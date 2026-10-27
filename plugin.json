@@ -1,0 +1,44 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "seller-ai",
+  "version": "1.1.0",
+  "description": "Работа с магазинами Ozon через Seller AI: заказы, поставки FBO, товары, цены, акции, продвижение, юнит-экономика, прибыль и отчёты. MCP-сервер Seller AI и навыки к нему.",
+  "author": {
+    "name": "Seller AI",
+    "url": "https://seller.alven.studio"
+  },
+  "homepage": "https://seller.alven.studio",
+  "repository": "https://github.com/alvenstudio/seller-ai-plugin",
+  "keywords": [
+    "ozon",
+    "marketplace",
+    "seller-ai",
+    "mcp",
+    "fbo",
+    "fbs",
+    "unit-economics"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Seller AI",
+        "shortDescription": "Магазины Ozon: заказы, поставки, цены, реклама, прибыль",
+        "longDescription": "Работа с магазинами Ozon через Seller AI: заказы, поставки FBO, товары, цены, акции, продвижение, юнит-экономика, прибыль и отчёты. MCP-сервер Seller AI и навыки к нему.",
+        "developerName": "Seller AI",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://seller.alven.studio"
+      }
+    },
+    "com.nousresearch.hermes": {
+      "servers": {
+        "seller-ai": {
+          "trust": "untrusted"
+        }
+      }
+    }
+  }
+}

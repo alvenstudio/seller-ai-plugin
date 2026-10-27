@@ -1,0 +1,76 @@
+---
+name: orders
+description: "Заказы и отправления Ozon через Seller AI: список заказов всех схем (FBO, FBS, realFBS) за период, отправления FBO и FBS по вкладкам кабинета, карточка одного отправления (товары, кластеры, тип покупателя, отмена), начисления Ozon по отправлению. Использовать когда пользователь спрашивает про заказы, отправления, статусы, сколько заказали товара за период, где заказ, почему отменён, сколько Ozon начислил по отправлению."
+---
+
+# Заказы и отправления (FBO, FBS, realFBS)
+
+Только чтение. Всё — инструментами MCP Seller AI; `store_id` — из `stores_list` (поле `id`), не название магазина.
+Сборка, отмена, доп. информация FBS — навык `fbs-orders`.
+
+## Какой инструмент брать
+
+| Вопрос | Инструмент | Аргументы |
+|---|---|---|
+| «Сколько заказов / какие заказы за период», по товару, по складу, по всем схемам сразу | `orders_list` | `date_from`, `date_to` (дни МСК, включительно), `scheme` (`fbo`/`fbs`/`rfbs`), `status` (статусы Ozon через запятую), `sku` или `offer_id`, `warehouse_id`, `posting_number`, `limit` ≤ 500, `offset` |
+| Вкладка «FBO → Заказы» как в кабинете | `postings_fbo_list` | `tab` (`all`, `awaiting_packaging`, `awaiting_deliver`, `delivering`, `delivered`, `cancelled`), `period` (`all`/`today`) или `date_from`/`date_to`, `search` (артикул, название, SKU), `posting_number`, `cursor`, `limit` ≤ 100 |
+| Одно отправление FBO | `postings_fbo_get` | `posting` — номер отправления |
+| Вкладка «FBS → Заказы» как в кабинете | `postings_fbs_list` | `tab` (`awaiting_packaging` по умолчанию, `awaiting_deliver`, `shipped`, `delivering`, `disputed`, `delivered`, `cancelled`, `all`), `scheme` (`fbs`/`rfbs`), `warehouse_ids`, `provider_ids`, `delivery_method_ids`, `shipment_day` (`today`/`tomorrow`), период, `search`, `cursor` |
+| Одно отправление FBS / realFBS | `postings_fbs_get` | `posting` |
+| Что Ozon начислил по отправлению | `finance_accruals_list` | `search` = номер отправления, `search_scope=all` |
+
+- `orders_list` — плоский список с `total`: для «сколько» хватает `total` при `limit=1`; штуки — сумма `products[].quantity`
+  по страницам (`offset` += `limit`, пока не наберётся `total`).
+- Списки отправлений листаются курсором: `next_cursor` → `cursor` следующего вызова, `null` — последняя страница.
+- Номер заказа (`order_number`) в `posting_number` находит все отправления заказа (заказ, разделённый на отправления).
+- Без периода `postings_fbo_list` берёт три месяца по дате создания, `postings_fbs_list` — все дни; период — не больше двух лет.
+
+## Как читать ответ
+
+- **Цена.** `products[].price` — «Предельная цена»: цена продавца за штуку после его акций, до скидок за счёт Ozon; `total` —
+  Σ цена × количество. Цену, которую заплатил покупатель, и скидку Ozon (СПП) Seller AI не показывает — так и сказать, не
+  выводить её из других полей. `payout` в `orders_list` — выплата по строке, как её отдал Ozon в отправлении (часто
+  `null`); за фактом денег — начисления (ниже).
+- Деньги — рубли десятичной строкой до копейки; `null` — неизвестно, а не 0. Идентификаторы Ozon (SKU, склад) — строки цифр.
+- Время — UTC в ISO; пользователю показывать по Москве. FBO-список упорядочен по `created_at`, FBS — по `in_process_at` («Принят»).
+- FBS: `shipment_date` — срок отгрузки Ozon, `shipment_date_without_delay` — «Дата отгрузки без просрочки», `tariff` — «Тариф
+  отгрузки» (ступени скидки/штрафа, см. `fbs-orders`), `needs_additional_info` — нужна маркировка/ГТД, `parent_posting_number` —
+  из какого отправления выделено. `scheme: rfbs` — realFBS (доставка не Ozon).
+- `postings_fbo_get` / `postings_fbs_get`: `buyer.type` — `legal` (юрлицо) или `individual`; `cancellation` — причина, кто
+  отменил (`initiator`), отменено ли после отгрузки, `affect_cancellation_rating` (входит ли в рейтинг отмен). Персональных данных
+  покупателя в Seller AI нет.
+- `postings_fbs_get` ещё даёт габариты и вес строк (`dimensions_mm`, `weight_kg`, `total_weight_kg`), плановую доставку и
+  `tariff_base` — «Сумма для расчёта тарифа».
+
+### Свежесть и пустые ответы
+
+- `streams[]` / `coverage.streams[]`: `last_success_at = null` — поток ещё ни разу не загружен: сказать «данные ещё
+  загружаются», а не «заказов нет». `coverage.period_covered = false` — история синка не покрывает весь период: назвать это.
+- Предупреждение `sync_pending` или 409 `not_ready` — то же самое: данные не готовы, это не ноль.
+
+### Начисления по отправлению
+
+`finance_accruals_list` с `search=<номер>` и `search_scope=all` ищет по всем датам: `unit_number` = номер отправления. В строке —
+`amount` (знак: продажа +, удержания −), `type_name`, `children[]` с разбивкой («Выручка», «Вознаграждение за продажу»,
+логистика, обработка, доставка до места выдачи…). Свежие отправления начислений ещё не имеют — это «ещё не начислено», не 0.
+Для периода: `from`/`to`, `scheme`, без `search` — и группировать по `unit_number`.
+
+## Статусы Ozon
+
+| Статус | FBO | FBS |
+|---|---|---|
+| `awaiting_registration` | — | ожидает регистрации |
+| `acceptance_in_progress` | — | принимается |
+| `awaiting_approve` | — | ожидает подтверждения |
+| `awaiting_packaging` | ожидает упаковки | ожидает сборки |
+| `awaiting_deliver` | ожидает доставки | ожидает отгрузки (собрано) |
+| `sent_by_seller`, `driver_pickup` | — | отгружено продавцом / забрал курьер |
+| `delivering` | доставляется | доставляется |
+| `arbitration`, `client_arbitration`, `not_accepted` | — | спорные |
+| `delivered` | доставлен | доставлен |
+| `cancelled` | отменён | отменён |
+
+## Ответ пользователю
+
+Таблица: номер отправления, статус по-русски, дата (МСК), товары (артикул × шт), сумма по цене продавца, склад/кластер.
+Период, схема и фильтр — в первой строке. Для «сколько» — число отправлений и штук, по схемам и складам, если просили.

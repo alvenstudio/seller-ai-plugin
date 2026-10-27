@@ -1,0 +1,638 @@
+{
+  "version": 4,
+  "name": "plan",
+  "rates": "fraction",
+  "money": "decimal",
+  "rounding": "display_only",
+  "missing": "null_propagates",
+  "unit": "one bought-out unit",
+  "price_basis": "seller price including seller promotions, before Ozon's points discount",
+  "ast_contract": {
+    "string": "input or preceding step key",
+    "number": "decimal constant",
+    "null": "unknown",
+    "comparison_null": "false",
+    "arithmetic_null": "propagate",
+    "if": "lazy evaluation",
+    "division_zero": "null",
+    "coalesce": "first non-null"
+  },
+  "inputs": {
+    "price": "seller price with the seller's promotions, ₽ (card marketing_seller_price or the plan's price)",
+    "cost": "cost of goods per unit, ₽",
+    "drr": "advertising share of ordered revenue (fraction)",
+    "other_unit_cost": "other costs per unit: packaging, labels, delivery to Ozon, ₽",
+    "commission_micro": "sales commission rate for price <= 100 ₽, with individual conditions applied (fraction)",
+    "commission_low": "sales commission rate for 100 < price <= 300 ₽ (fraction)",
+    "commission_high": "sales commission rate for price > 300 ₽ (fraction)",
+    "commission_rate_manual": "a manual commission rate for any price (fraction), null when not set",
+    "logistics_lt_300": "direct logistics per shipped unit when price <= 300 ₽",
+    "logistics_gte_300": "direct logistics per shipped unit when price > 300 ₽",
+    "last_mile": "last mile and posting processing per shipped unit, ₽",
+    "reverse_logistics": "reverse logistics per non-bought or returned unit, ₽",
+    "return_processing": "processing of a non-buyout or return by partners, ₽",
+    "buyout": "share of shipped units kept by buyers (fraction, 0 < buyout <= 1)",
+    "cancel_before_ship": "share of orders cancelled before shipment (fraction)",
+    "disposal_share": "disposed units per bought unit (fraction); packaging quality = 1 - disposal_share",
+    "disposal_fee": "Ozon's disposal fee per unit, ₽",
+    "supply_cost": "crossdock and supply processing per unit (FBO), ₽",
+    "placement": "placement (storage) per bought unit (FBO), ₽",
+    "acquiring_rate": "acquiring as a share of price (fraction)",
+    "stars_rate": "«Звёздные товары» as a share of price (fraction)",
+    "insurance_rate": "stock insurance as a share of price (fraction)",
+    "other_ozon_fees": "other Ozon fees per bought unit (packing, fines, reviews, installment …), ₽",
+    "early_payout_rate": "Ozon's fee for daily, weekly and early payouts as a share of each payout to the seller's bank account (fraction)",
+    "points_share": "«Баллы за скидки» as a share of price, not taxed with the revenue base (fraction)",
+    "tax_rate": "income tax rate (fraction): УСН 6 % / 15 % or an effective rate",
+    "vat_rate": "VAT rate included in the income (fraction): 0, 0.05, 0.07, 0.1, 0.22",
+    "tax_on_sales": "1 when the tax base is the whole sale (price), else 0",
+    "tax_on_profit": "1 when the tax base is the profit before tax, else 0"
+  },
+  "steps": [
+    {
+      "key": "commission_band_rate",
+      "expression": "price >= 0 ? (price <= 100 ? commission_micro : price <= 300 ? commission_low : commission_high) : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lte",
+            "args": [
+              0,
+              "price"
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "price",
+                  100
+                ]
+              },
+              "commission_micro",
+              {
+                "op": "if",
+                "args": [
+                  {
+                    "op": "lte",
+                    "args": [
+                      "price",
+                      300
+                    ]
+                  },
+                  "commission_low",
+                  "commission_high"
+                ]
+              }
+            ]
+          },
+          null
+        ]
+      }
+    },
+    {
+      "key": "commission_rate",
+      "expression": "commission_rate_manual ?? commission_band_rate",
+      "ast": {
+        "op": "coalesce",
+        "args": [
+          "commission_rate_manual",
+          "commission_band_rate"
+        ]
+      }
+    },
+    {
+      "key": "commission",
+      "expression": "price * commission_rate",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "price",
+          "commission_rate"
+        ]
+      }
+    },
+    {
+      "key": "acquiring",
+      "expression": "price * acquiring_rate",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "price",
+          "acquiring_rate"
+        ]
+      }
+    },
+    {
+      "key": "logistics",
+      "expression": "price >= 0 ? (price <= 300 ? logistics_lt_300 : logistics_gte_300) : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lte",
+            "args": [
+              0,
+              "price"
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "price",
+                  300
+                ]
+              },
+              "logistics_lt_300",
+              "logistics_gte_300"
+            ]
+          },
+          null
+        ]
+      }
+    },
+    {
+      "key": "logistics_total",
+      "expression": "0 < buyout <= 1 ? (logistics + last_mile) / buyout + (1 - buyout) / buyout * (reverse_logistics + return_processing) : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "buyout"
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "buyout",
+                  1
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "div",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          "logistics",
+                          "last_mile"
+                        ]
+                      },
+                      "buyout"
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "sub",
+                            "args": [
+                              1,
+                              "buyout"
+                            ]
+                          },
+                          "buyout"
+                        ]
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          "reverse_logistics",
+                          "return_processing"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              null
+            ]
+          },
+          null
+        ]
+      }
+    },
+    {
+      "key": "disposal_fees",
+      "expression": "disposal_share * disposal_fee",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "disposal_share",
+          "disposal_fee"
+        ]
+      }
+    },
+    {
+      "key": "stars",
+      "expression": "price * stars_rate",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "price",
+          "stars_rate"
+        ]
+      }
+    },
+    {
+      "key": "insurance",
+      "expression": "price * insurance_rate",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "price",
+          "insurance_rate"
+        ]
+      }
+    },
+    {
+      "key": "total_ozon",
+      "expression": "commission + acquiring + logistics_total + supply_cost + placement + disposal_fees + stars + insurance + other_ozon_fees",
+      "ast": {
+        "op": "add",
+        "args": [
+          "commission",
+          "acquiring",
+          "logistics_total",
+          "supply_cost",
+          "placement",
+          "disposal_fees",
+          "stars",
+          "insurance",
+          "other_ozon_fees"
+        ]
+      }
+    },
+    {
+      "key": "advertising",
+      "expression": "0 < buyout <= 1 && cancel_before_ship < 1 ? price * drr / ((1 - cancel_before_ship) * buyout) : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "buyout"
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "buyout",
+                  1
+                ]
+              },
+              {
+                "op": "if",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      "cancel_before_ship",
+                      1
+                    ]
+                  },
+                  {
+                    "op": "div",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          "price",
+                          "drr"
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "sub",
+                            "args": [
+                              1,
+                              "cancel_before_ship"
+                            ]
+                          },
+                          "buyout"
+                        ]
+                      }
+                    ]
+                  },
+                  null
+                ]
+              },
+              null
+            ]
+          },
+          null
+        ]
+      }
+    },
+    {
+      "key": "payout",
+      "expression": "price - total_ozon - advertising",
+      "ast": {
+        "op": "sub",
+        "args": [
+          {
+            "op": "sub",
+            "args": [
+              "price",
+              "total_ozon"
+            ]
+          },
+          "advertising"
+        ]
+      }
+    },
+    {
+      "key": "early_payout",
+      "expression": "payout > 0 ? payout * early_payout_rate / (1 + early_payout_rate) : payout <= 0 ? 0 : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "payout"
+            ]
+          },
+          {
+            "op": "div",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  "payout",
+                  "early_payout_rate"
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  "early_payout_rate"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "payout",
+                  0
+                ]
+              },
+              0,
+              null
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "disposal_goods",
+      "expression": "disposal_share * cost",
+      "ast": {
+        "op": "mul",
+        "args": [
+          "disposal_share",
+          "cost"
+        ]
+      }
+    },
+    {
+      "key": "income",
+      "expression": "tax_on_sales == 1 ? price : price * (1 - points_share)",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "eq",
+            "args": [
+              "tax_on_sales",
+              1
+            ]
+          },
+          "price",
+          {
+            "op": "mul",
+            "args": [
+              "price",
+              {
+                "op": "sub",
+                "args": [
+                  1,
+                  "points_share"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "vat",
+      "expression": "income * vat_rate / (1 + vat_rate)",
+      "ast": {
+        "op": "div",
+        "args": [
+          {
+            "op": "mul",
+            "args": [
+              "income",
+              "vat_rate"
+            ]
+          },
+          {
+            "op": "add",
+            "args": [
+              1,
+              "vat_rate"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "profit_before_tax",
+      "expression": "payout - early_payout - cost - disposal_goods - other_unit_cost - vat",
+      "ast": {
+        "op": "sub",
+        "args": [
+          {
+            "op": "sub",
+            "args": [
+              {
+                "op": "sub",
+                "args": [
+                  {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          "payout",
+                          "early_payout"
+                        ]
+                      },
+                      "cost"
+                    ]
+                  },
+                  "disposal_goods"
+                ]
+              },
+              "other_unit_cost"
+            ]
+          },
+          "vat"
+        ]
+      }
+    },
+    {
+      "key": "tax_base",
+      "expression": "tax_on_profit == 1 ? profit_before_tax : income - vat",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "eq",
+            "args": [
+              "tax_on_profit",
+              1
+            ]
+          },
+          "profit_before_tax",
+          {
+            "op": "sub",
+            "args": [
+              "income",
+              "vat"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "tax",
+      "expression": "tax_base > 0 ? tax_rate * tax_base : tax_base <= 0 ? 0 : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "tax_base"
+            ]
+          },
+          {
+            "op": "mul",
+            "args": [
+              "tax_rate",
+              "tax_base"
+            ]
+          },
+          {
+            "op": "if",
+            "args": [
+              {
+                "op": "lte",
+                "args": [
+                  "tax_base",
+                  0
+                ]
+              },
+              0,
+              null
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "profit",
+      "expression": "profit_before_tax - tax",
+      "ast": {
+        "op": "sub",
+        "args": [
+          "profit_before_tax",
+          "tax"
+        ]
+      }
+    },
+    {
+      "key": "margin",
+      "expression": "price > 0 ? profit / price : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "price"
+            ]
+          },
+          {
+            "op": "div",
+            "args": [
+              "profit",
+              "price"
+            ]
+          },
+          null
+        ]
+      }
+    },
+    {
+      "key": "profitability",
+      "expression": "cost > 0 ? profit / cost : null",
+      "ast": {
+        "op": "if",
+        "args": [
+          {
+            "op": "lt",
+            "args": [
+              0,
+              "cost"
+            ]
+          },
+          {
+            "op": "div",
+            "args": [
+              "profit",
+              "cost"
+            ]
+          },
+          null
+        ]
+      }
+    }
+  ]
+}

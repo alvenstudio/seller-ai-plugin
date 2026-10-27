@@ -1,0 +1,20 @@
+{
+  "name": "seller-ai",
+  "interface": {
+    "displayName": "Seller AI"
+  },
+  "plugins": [
+    {
+      "name": "seller-ai",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
