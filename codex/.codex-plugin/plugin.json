@@ -1,6 +1,6 @@
 {
   "name": "seller-ai",
-  "version": "1.4.5",
+  "version": "1.5.0",
   "description": "Работа с магазинами Ozon через Seller AI: заказы, поставки FBO, товары, цены, акции, продвижение, юнит-экономика, прибыль и отчёты. MCP-сервер Seller AI и навыки к нему.",
   "author": {
     "name": "Seller AI",
