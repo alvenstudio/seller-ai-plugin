@@ -8,7 +8,7 @@
       "name": "seller-ai",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./codex"
       },
       "policy": {
         "installation": "AVAILABLE",

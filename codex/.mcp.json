@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "seller-ai": {
+      "type": "http",
+      "url": "https://seller.alven.studio/mcp"
+    }
+  }
+}

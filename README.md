@@ -34,9 +34,12 @@ claude plugin install seller-ai --marketplace alvenstudio/seller-ai-plugin
 ```bash
 codex plugin marketplace add alvenstudio/seller-ai-plugin
 codex plugin add seller-ai@seller-ai
+codex mcp login seller-ai
 ```
 
-Маркетплейс появится и в каталоге плагинов приложения ChatGPT. Обновления: `codex plugin marketplace upgrade seller-ai`.
+Маркетплейс появится и в каталоге плагинов приложения ChatGPT (Codex), плагин и вход — там же. Обновления:
+`codex plugin marketplace upgrade seller-ai`. Codex ставит отсюда копию плагина из папки `codex/` в своём формате: пакету
+Agent Plugins он показывает модели не больше 64 КБ описаний инструментов MCP, а у Seller AI их больше.
 
 ### VS Code и GitHub Copilot
 
@@ -60,10 +63,13 @@ Cursor (обновление — `git pull`).
 ```bash
 hermes plugins install alvenstudio/seller-ai-plugin
 hermes plugins enable seller-ai
+hermes mcp add seller-ai --url https://seller.alven.studio/mcp --auth oauth
+hermes mcp login seller-ai
 ```
 
-Автообновление — `plugins.auto_apply: true` в конфиге Hermes; иначе `hermes plugins update seller-ai`. Команды, которые
-меняют данные в Ozon, Hermes подтверждает у вас по каждому вызову.
+Плагин даёт навыки; сервер с входом по OAuth Hermes берёт из своего конфига (в пакете Agent Plugins способа входа не
+указать), запись конфига заменяет серверную запись плагина. Автообновление навыков — `plugins.auto_apply: true` в конфиге
+Hermes; иначе `hermes plugins update seller-ai`.
 
 ### Другие агенты
 

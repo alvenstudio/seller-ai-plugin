@@ -1,0 +1,17 @@
+{
+  "_comment": "Пороги аналитики ставок. default_strategy — для всех магазинов; stores — переопределения по store_id Seller AI; lessons — подтверждённые пользователем правила. Файл правит человек (см. SKILL.md, «Решения пользователя»), скрипты его только читают.",
+  "default_strategy": {
+    "target_band": {
+      "below": -2.0,
+      "above": 1.0
+    },
+    "cpc_step_up_pct": 10,
+    "cpc_step_down_pct": 12,
+    "cpc_step_up_cap_pct": 20,
+    "cpc_step_down_cap_pct": 25,
+    "min_spend_for_action_rub": 300,
+    "guardrail_total_drr_over_target_pct": 2.0
+  },
+  "stores": {},
+  "lessons": []
+}
