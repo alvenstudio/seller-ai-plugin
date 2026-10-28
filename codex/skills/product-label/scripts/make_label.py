@@ -2,14 +2,14 @@
 """
 Товарная этикетка одной командой: ответ `products_get` (сохранённый агентом в файл) + labels-config.json → PDF и PNG.
 
-Сеть не нужна: данные карточки агент берёт инструментом Seller AI `products_get`, реквизиты и состав — из локального
-labels-config.json, значения из чата — флагами. Характеристики карточки (состав, КБЖУ, срок, хранение, страна, масса)
-Seller AI пока не отдаёт; когда они есть у агента в формате Ozon (`attributes[]`: `id` или `attribute_id`,
-`values[].value`), `--attributes` берёт их сами: состав 8050, белки 7584, жиры 7585, углеводы 7586, ккал 7609, срок
-7578 (дни → «12 месяцев»), хранение 8787, страна 4389, масса 4383 (только сверка с названием).
+Сеть не нужна: данные карточки агент берёт инструментами Seller AI `products_get` и `products_content_get`, реквизиты —
+из локального labels-config.json, значения из чата — флагами. Характеристики карточки (состав, КБЖУ, срок, хранение,
+страна, масса) — ответ `products_content_get`, сохранённый в файл, или любой список в формате Ozon (`attributes[]`: `id`
+или `attribute_id`, `values[].value`): `--attributes` берёт их сами — состав 8050, белки 7584, жиры 7585, углеводы 7586,
+ккал 7609, срок 7578 (дни → «12 месяцев»), хранение 8787, страна 4389, масса 4383 (только сверка с названием).
 
     make_label.py --product product.json --store <store_id> --title "КУРАГА БЕЗ САХАРА" --packing-date 01.10.2026
-    make_label.py --product product.json --attributes attributes.json --store <store_id> --packer "Иванов" --no-title
+    make_label.py --product product.json --attributes content.json --store <store_id> --packer "Иванов" --no-title
     make_label.py --product product.json --store <store_id> --packer-name "ИП Иванов И. И." --inn … --address …
 
 Приоритет: флаги > характеристики карточки (`--attributes`) > настройки товара в labels-config.json > карточка
@@ -145,7 +145,7 @@ def apply_card(d: dict, card: dict, name_weight: str) -> list[str]:
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Товарная этикетка по ответу products_get")
     ap.add_argument("--product", required=True, help="JSON — ответ products_get")
-    ap.add_argument("--attributes", help="JSON — характеристики карточки в формате Ozon (attributes[])")
+    ap.add_argument("--attributes", help="JSON — ответ products_content_get или характеристики в формате Ozon (attributes[])")
     ap.add_argument("--store", required=True, help="store_id Seller AI")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--title", help="заголовок (короткое название КАПСОМ)")
