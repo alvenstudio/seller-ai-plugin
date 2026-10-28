@@ -1,6 +1,6 @@
 ---
 name: sales-analytics
-description: "Аналитика продаж магазина Ozon через Seller AI: заказы и продажи по дням и по товарам (штуки, суммы по цене продавца), выкупы по начислениям, аналитика Ozon за любой период по дням, неделям и месяцам (заказано, показы в поиске и на карточке, корзины, сессии, конверсия, позиция), цены товаров (без акций, с акциями продавца, зачёркнутая, ограничение, индекс цен), остатки FBO с ликвидностью, среднесуточными продажами и днями до конца остатка, продажи по кластерам, топ товаров. Использовать когда пользователь спрашивает, сколько продали или заказали за период, какие товары продаются лучше, какая цена у товара, сколько осталось на складах, на сколько дней хватит остатка, динамику продаж."
+description: "Аналитика продаж магазина Ozon через Seller AI: заказы и продажи по дням и по товарам (штуки, суммы по цене продавца), выкупы по начислениям, аналитика Ozon за любой период по дням, неделям и месяцам, по товарам, категориям и брендам (заказано, показы в поиске и на карточке, корзины, сессии, конверсия, позиция), цены товаров (без акций, с акциями продавца, зачёркнутая, ограничение, индекс цен), остатки FBO с ликвидностью, среднесуточными продажами и днями до конца остатка, продажи по кластерам, топ товаров. Использовать когда пользователь спрашивает, сколько продали или заказали за период, какие товары продаются лучше, какая цена у товара, сколько осталось на складах, на сколько дней хватит остатка, динамику продаж."
 ---
 
 # Аналитика продаж
@@ -17,7 +17,7 @@ description: "Аналитика продаж магазина Ozon через S
 | Каждый заказ: товары, цена, кластеры, статус | `orders_list` (`scheme`, `status`, `date_from`, `date_to`, `sku`, `offer_id`, `warehouse_id`, `limit` ≤ 500, `offset`) | строка — отправление: `status`, `created_at`, `cluster_from` / `cluster_to`, `products[] {sku, offer_id, quantity, price, payout}`, `total` |
 | Реализация (продажи нетто) по дням, неделям, месяцам и схемам | `economics_profit_get` (`from`, `to`, `group`, `scheme`) | `series[].sales` (до возвратов), `amounts.returns`, `summary.units_sold` / `units_returned`, `by_scheme[]` |
 | Выкуплено и реализация по товарам | `unit_economics_accruals_list` (`from`, `to`, `scheme`) | `units {sold, returned, net}`, `sales {total, revenue, points, partners}` — по дате начисления (доставка), а не заказа |
-| Аналитика Ozon за любой период: заказано (сумма, штуки), показы в поиске и на карточке, корзины, сессии, конверсия в корзину, позиция, возвраты, отмены, доставлено — по дням, неделям, месяцам или за период, по товарам или итогом магазина | `analytics_products_list` (`date_from`, `date_to` — закрытые дни, по умолчанию последние 7; `group` `period`/`day`/`week`/`month`; `slice` `product`/`store`; `skus`, `offer_id`; `sort`, `order`; `limit` ≤ 500, `offset`) | товар: `revenue`, `ordered_units`, `hits_view`, `hits_view_search`, `hits_view_pdp`, `hits_tocart*`, `session_view`, `conv_tocart`, `position_category`, `returns`, `cancellations`, `delivered_units`, `series[]` по интервалам (`covered`); `totals` — магазин (выбранные товары); `coverage {complete, covered_from, covered_to, ranges, premium}`, `warnings` |
+| Аналитика Ozon за любой период: заказано (сумма, штуки), показы в поиске и на карточке, корзины, сессии, конверсия в корзину, позиция, возвраты, отмены, доставлено — по дням, неделям, месяцам или за период, по товарам, по категориям или брендам или итогом магазина | `analytics_products_list` (`date_from`, `date_to` — закрытые дни, по умолчанию последние 7; `group` `period`/`day`/`week`/`month`; `slice` `product`/`store`/`category`/`brand`; `skus`, `offer_id`; `sort`, `order`; `limit` ≤ 500, `offset`) | товар: `revenue`, `ordered_units`, `hits_view`, `hits_view_search`, `hits_view_pdp`, `hits_tocart*`, `session_view`, `conv_tocart`, `position_category`, `returns`, `cancellations`, `delivered_units`, `series[]` по интервалам (`covered`); `slice=category`/`brand` — те же показатели в `groups[]` (`id`, `name`, у категории `path` — путь в дереве Ozon от корня, `skus` — товаров группы с данными); `totals` — магазин (выбранные товары); `coverage {complete, covered_from, covered_to, ranges, premium}`, `warnings` |
 | Заказано за 7 / 28 дней с динамикой к прошлому периоду, как в «Ценах» | `prices_products_list` (`period=7` или `28`, `status`, `search`, `sort=ordered_units`) | `sales {ordered_units, ordered_units_change_pct, views, views_change_pct, conversion_pct}`; `sales` списка — период и `orders_covered`, `covered_to` |
 | Цены товара | `prices_products_list`, `prices_products_get` | `prices {price, old_price, min_price, marketing_seller_price, net_price, vat}`, `price_index {color, …}`, `actions`, `stocks`, `expenses` |
 | Остатки FBO, ликвидность, дни до конца | `stocks_fbo_list` (`view=products` или `clusters`, `search`, `liquidity`, `stock`, `cluster_ids`, `sort`) | `available`, `unavailable`, `in_transit`, `removal`, `total`, `counters`; аналитика Ozon `liquidity`, `ads` (среднесуточные продажи за 28 дней), `idc` (дней до конца остатка), `days_without_sales`; `analytics: false` — эти поля `null` |
@@ -64,6 +64,10 @@ description: "Аналитика продаж магазина Ozon через S
     рубля: у неё свои правила отмен и времени заказа.
   - Ряд по дням на много товаров тяжёлый: не больше 10 000 точек на страницу (`limit` × интервалов) — брать неделю или месяц,
     `skus`, меньше `limit`.
+  - **По категориям и брендам** (`slice=category` или `brand`): товары складываются по карточке — категория как в «Товарах» (тип,
+    иначе категория описания; `path` — категории над ней, от корня: по ним складывать верхние уровни, «категории 1–3» Ozon), бренд —
+    характеристика «Бренд» карточки. Товары без карточки, категории или бренда — в группе `id: null` («категория неизвестна»):
+    группы в сумме дают `totals`. `total` — число групп; листать `offset`; сортировка — по показателю, не по `sku`.
 - **Дни запаса** — «Доступно к продаже» ÷ среднесуточные заказы; у Ozon — `idc` в `stocks_fbo_list`, у Seller AI на главной —
   доступно ÷ (заказы FBO за 14 дней ÷ 14).
 - Списки постраничные: читать все страницы (`page`/`page_size` или `offset`/`limit`), пока не набран `total`.
@@ -75,7 +79,7 @@ description: "Аналитика продаж магазина Ozon через S
 
 ## Пока недоступно в Seller AI
 
-- Разрезы аналитики Ozon по категориям 1–4 уровня, брендам и моделям: Seller AI хранит аналитику по SKU и дню — сложить товары по
-  категории можно самим, по `products_list` (категория карточки).
+- Разрез аналитики Ozon по моделям (объединённым карточкам): Seller AI хранит аналитику по SKU и дню, модели складывать самим — по
+  `model_id` карточек из `products_list`.
 - Сессии и конверсия за период так, как их считает кабинет (уникальные посетители периода), сегодняшний день, аналитика поисковых
   запросов («Запросы моего товара», средняя позиция в поиске) — сказать, что это пока недоступно.

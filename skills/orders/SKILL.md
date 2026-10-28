@@ -13,7 +13,7 @@ description: "Заказы и отправления Ozon через Seller AI: 
 | Вопрос | Инструмент | Аргументы |
 |---|---|---|
 | «Сколько заказов / какие заказы за период», по товару, по складу, по всем схемам сразу | `orders_list` | `date_from`, `date_to` (дни МСК, включительно), `scheme` (`fbo`/`fbs`/`rfbs`), `status` (статусы Ozon через запятую), `sku` или `offer_id`, `warehouse_id`, `posting_number`, `limit` ≤ 500, `offset` |
-| Вкладка «FBO → Заказы» как в кабинете | `postings_fbo_list` | `tab` (`all`, `awaiting_packaging`, `awaiting_deliver`, `delivering`, `delivered`, `cancelled`), `period` (`all`/`today`) или `date_from`/`date_to`, `search` (артикул, название, SKU), `posting_number`, `cursor`, `limit` ≤ 100 |
+| Вкладка «FBO → Заказы» как в кабинете | `postings_fbo_list` | `tab` (`all`, `awaiting_packaging`, `awaiting_deliver`, `delivering`, `delivered`, `cancelled`), `period` (`all`/`today`) или `date_from`/`date_to`, `search` (артикул, название, SKU), `posting_number`, `cursor`, `limit` ≤ 500 |
 | Одно отправление FBO | `postings_fbo_get` | `posting` — номер отправления |
 | Вкладка «FBS → Заказы» как в кабинете | `postings_fbs_list` | `tab` (`awaiting_packaging` по умолчанию, `awaiting_deliver`, `shipped`, `delivering`, `disputed`, `delivered`, `cancelled`, `all`), `scheme` (`fbs`/`rfbs`), `warehouse_ids`, `provider_ids`, `delivery_method_ids`, `shipment_day` (`today`/`tomorrow`), период, `search`, `cursor` |
 | Одно отправление FBS / realFBS | `postings_fbs_get` | `posting` |
@@ -23,7 +23,7 @@ description: "Заказы и отправления Ozon через Seller AI: 
   по страницам (`offset` += `limit`, пока не наберётся `total`).
 - Списки отправлений листаются курсором: `next_cursor` → `cursor` следующего вызова, `null` — последняя страница.
 - Номер заказа (`order_number`) в `posting_number` находит все отправления заказа (заказ, разделённый на отправления).
-- Без периода `postings_fbo_list` берёт три месяца по дате создания, `postings_fbs_list` — все дни; период — не больше двух лет.
+- Без периода `postings_fbo_list` берёт три месяца по дате создания, `postings_fbs_list` — все дни; период — любой длины.
 
 ## Как читать ответ
 

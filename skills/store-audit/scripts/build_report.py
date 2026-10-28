@@ -8,7 +8,7 @@
         [--assets assets.json] [--batches batches.json] [--non-pickups np-*.json] [--seller seller.json] \
         [--removals removals.json] [--decommissioned dg-*.json] [--config audit-config.json] --out report.json
 
---profit    ответы economics_profit_get с group=month (окна не длиннее 366 дней, подряд, без пересечений);
+--profit    ответы economics_profit_get с group=month (весь период одним окном или окна подряд, без пересечений);
 --accruals  ответы unit_economics_accruals_list за те же окна;
 --assets    ответ assets_summary_get (остатки и активы сейчас);
 --batches   ответ cost_batches_list без sku (сверка остатка FBO с журналом партий);

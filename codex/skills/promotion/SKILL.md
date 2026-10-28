@@ -18,14 +18,18 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
    `performance_key_refused`, `seller_key_expired` / `seller_key_invalid` (без ключа Seller заказы не грузятся, биддер не видит
    продаж). `features[]` с `available: false` — какие действия недоступны и почему (`missing_methods`, `performance_not_connected`).
    Предупреждение `key_warning` к результату любого инструмента магазина — то же самое.
-2. `promotion_summary_get`: роль (`owner`, `manager`, `viewer`), `can_write`, `mutations.enabled` (выключено — команды не уйдут,
-   причина в `reason`), `limits` (`cpc_bid_max`, `target_cir_min/max`, `weekly_budget_per_sku_min`), открытые операции.
-3. Ответ 409 `not_ready` или `sync_pending` — «реклама ещё загружается», не «расхода нет». Список кампаний, карточка и товары кампании,
-   «Оплата за заказ: выбранные товары» и её выгрузка отвечают и пока реклама загружается: чего нет в базе Seller AI, он сам дочитывает из
-   Ozon (`source`: `mirror` или `observed_now`, `observed_at` — на какой момент данные). `warnings` — что ещё грузится («статистика …
-   неполные» — показатели за период неполные, не «расхода нет») или что перечитать не вышло (данные на указанное время): сказать это вместе
-   с цифрами. Кампании нет ни в Seller AI, ни в Ozon — 404; 409 `performance_unavailable` — нет действующего ключа Performance, 429 / 503
-   с `retry_after` — повторить позже (так же у списка «Оплаты за заказ», которого в Seller AI ещё нет).
+2. `promotion_summary_get` (отвечает всегда, и пока реклама загружается): роль (`owner`, `admin`, `manager`, `viewer`), `can_write`,
+   `can_write_owner` (создание кампаний, «Все товары», безлимит — владелец или администратор), `mutations.enabled` (выключено — команды
+   не уйдут, причина в `reason`), `limits` (`cpc_bid_max`, `target_cir_min/max`, `weekly_budget_per_sku_min`), открытые операции;
+   `cpo_all: null` с предупреждением в `warnings` — «Все товары» ещё не загружены, а не «нет».
+3. Загрузку рекламы ждут только деньги из отчётов Ozon: `promotion_analytics_*`, `promotion_expenses_*`, выгрузки отчёта о заказах и
+   «Всех товаров» — 409 `not_ready` или `sync_pending` — «реклама ещё загружается», не «расхода нет». Остальное отвечает и пока реклама
+   загружается: чего нет в базе Seller AI, он сам дочитывает из Ozon (`source`: `mirror` или `observed_now`, `observed_at` — на какой
+   момент данные). `warnings` — что ещё грузится («статистика … неполные» — показатели за период неполные, не «расхода нет»; история
+   без изменений из кабинета до первой загрузки; у «Все товары» `stats: null` — статистика ещё грузится, не 0) или что перечитать не
+   вышло (данные на указанное время): сказать это вместе с цифрами. Кампании нет ни в Seller AI, ни в Ozon — 404; 409
+   `performance_unavailable` — нет действующего ключа Performance, 429 / 503 с `retry_after` — повторить позже (так же у списка «Оплаты
+   за заказ», которого в Seller AI ещё нет).
 
 ## Чтение
 
@@ -36,9 +40,9 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
 | Карточка кампании | `promotion_campaigns_get` | `facts {drr_promo, drr_total, products_participating, cpo_rate_fixed, ad_spend, drr_ad_spend, revenue_active}` |
 | Товары кампании, ставки | `promotion_campaign_products_list` | `bid` (наблюдаемая, ₽; 0 у автостратегии), `bid_min`, `bid_max`, `competitive_bid`, `target_cir`, `cpo {enabled, display_bid_pct, reduced, fixed_bid_pct, carrots_additive_pct}`, `stats {expense, revenue, drr, drr_total, gmv_total, ad_spend, drr_ad_spend}`, `bidder` |
 | «Оплата за заказ: выбранные товары» | `promotion_cpo_products_list` (`enabled`, `bid_kind=reduced\|regular`, `carrots`) | `enabled`, `bid_pct`, `bid_rub`, `fixed_bid_pct`, `regular_bid_pct`, `reduced`, `display_bid_pct`, `cpc_campaigns`, `stats {cpo, combo}`, `drr` |
-| «Оплата за заказ: все товары» | `promotion_cpo_all_get` | `state`, `state_since`, `bid {value}` (5 / 7 / 9 %), `stats {expense, revenue, drr, active_days}` |
+| «Оплата за заказ: все товары» | `promotion_cpo_all_get` | `state`, `state_since`, `bid {value}` (5 / 7 / 9 %), `stats {expense, revenue, drr, active_days}` (`null`, пока отчёты грузятся), `warnings` |
 | Расход по дням и кампаниям («Детализация расходов») | `promotion_expenses_get` (`types=cpc,cpo_selected,cpo_all`) | `items[] {date, campaign_id, title, type, money_spent, bonus_spent}`, `totals`, `missing` (дни, которые Ozon ещё не отдал) |
-| Кто и что менял | `promotion_history_list` (`campaign_id`, `section=cpc\|cpo\|external`) | `items[] {at, source: seller_ai\|ozon, event, details}` |
+| Кто и что менял | `promotion_history_list` (`campaign_id`, `section=cpc\|cpo\|external`) | `items[] {at, source: seller_ai\|ozon, event, details}`; `warnings` — изменения из кабинета появятся после первой загрузки рекламы |
 | Алерты биддера и проверок Seller AI | `promotion_bidder_alerts_list` (`state=current\|open\|all`, `actionable`, `kinds`, `campaign_id`, `sku`, `date_from`, `date_to`) | `items[] {kind, scope, actionable, state, campaign_title, sku, name, message, details, raised_at, last_seen_at}`, `kinds[]` — счётчики |
 | Наши операции | `promotion_operations_list`, `promotion_operations_get` | статус команды (ниже) |
 
@@ -120,7 +124,9 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
 `succeeded` — значение подтверждено чтением Ozon после ответа. `waiting_quota` — ждёт квоты Ozon (лимиты на операции с кампаниями с
 14.09.2026), сама уйдёт; `partial` — часть товаров не принята, назвать какие (`items[].state`, `reason`); `outcome_unknown` — исход
 неизвестен, **не отправлять повторно**: `promotion_operations_check` и ждать сверки. Отказ 409 `stale_expected` — значение уже
-изменилось: перечитать и показать заново.
+изменилось: перечитать и показать заново. Команды не ждут загрузки рекламы: кампанию и её товары, которых ещё нет в Seller AI, он
+дочитывает сам. Кампании нет и прочитать её не вышло — 429 / 503 с `retry_after` (ничего не записано и не отправлено: повторить
+позже с тем же ключом), 409 `performance_unavailable` — нет действующего ключа Performance.
 
 **Настройки биддера** (наши данные, Ozon не вызывается, ответ синхронный):
 
@@ -130,12 +136,13 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
   N штук заказов по X %, потом обычная цель (`ramp: null` снимает). Предупредить: смена цели начинает обучение заново.
 - «ДРР из плана» в кампании Ozon «Целевой расход» — `promotion_campaign_products_plan_targets_set` (`items[{sku, enabled}]`): биддер
   держит «Целевой ДРР» товара в Ozon равным плану (вне 5–100 % — не отправляет, `state: unusable`).
-- Тестовый режим кампании — `promotion_campaigns_automation_set` (`execution_enabled`), только владелец.
+- Тестовый режим кампании — `promotion_campaigns_automation_set` (`execution_enabled`): владелец или администратор
+  (`promotion.spend`; у токена — «Продвижение: Управление»).
 
 **Команды в Ozon:**
 
 - Ставки ручной кампании — `promotion_campaign_products_bids_set`: `items[{sku, bid, expected_bid}]` (`bid` — целые рубли от
-  `bid_min` товара до `bid_max`, не выше 200; у «Целевого расхода» — `target_cir` %, у «Вывода в топ» — `top_position`). После
+  `bid_min` товара до `bid_max` — потолка Seller AI, по умолчанию 200 ₽; у «Целевого расхода» — `target_cir` %, у «Вывода в топ» — `top_position`). После
   `succeeded` показать наблюдаемую ставку из `promotion_campaign_products_list` (Seller AI подтверждает её чтением Ozon — отдельная
   проверка не нужна).
 - Бюджет и даты — `promotion_campaigns_update`: `budget {type: weekly, amount}`, `from_date` («Дата начала»), `to_date` («Дата
@@ -143,7 +150,8 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
   `promotion_campaigns_get`). Без `budget` бюджет Ozon не трогается. Начало — не раньше сегодня, конец — не раньше сегодня и
   не раньше начала; кампанию в архиве или завершённую не изменить; снять дату окончания Ozon не даёт. Готово, когда чтение
   кампании показало новые даты (`succeeded`); `failed` с «…не применил изменение» — Ozon дату не принял, так и сказать.
-  Безлимит — только владелец. Дневной и общий бюджет Ozon у продавца не принимает (дневной устарел, общий — только у
+  Безлимит — владелец или администратор (`promotion.spend`; у токена — «Продвижение: Управление»). Дневной и общий бюджет
+  Ozon у продавца не принимает (дневной устарел, общий — только у
   автоматических кампаний брендов и агентств): их только читать (`daily`, `total`).
 - Запуск / остановка — `promotion_campaigns_activate`, `promotion_campaigns_deactivate` (остановка поднимет ставку CPO товаров
   комбо до фиксированной: если пользователь этого не назвал — сказать и спросить один раз).

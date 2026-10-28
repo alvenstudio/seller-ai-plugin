@@ -10,7 +10,8 @@ description: "Финансовый аудит магазина Ozon за про�
 
 ## 1. Уточнить у пользователя
 
-- **Магазин и период** (`stores_list`; дни МСК). Длинный период — окнами не длиннее 366 дней.
+- **Магазин и период** (`stores_list`; дни МСК). Длинный период — одним окном: «Чистая прибыль» и «По начислениям» берут любой
+  загруженный период.
 - **Себестоимость и налог.** Это единственные данные, которых нет в Ozon. Проверить в Seller AI:
   - `cost_prices_list` — у каких товаров нет себестоимости (`current: null`) или она «из Ozon» (`source: ozon_net_price`); попросить
     недостающее (таблицей или картинкой — расшифровать) и записать периоды `cost_prices_save_many` (`changes[{product_id,
@@ -36,7 +37,7 @@ description: "Финансовый аудит магазина Ozon за про�
 
 | Файл | Инструмент и аргументы |
 |---|---|
-| `profit-<окно>.json` | `economics_profit_get`: `from`, `to` (окно ≤ 366 дней, окна подряд без пересечений), `group=month`, `scheme=all` |
+| `profit-<окно>.json` | `economics_profit_get`: `from`, `to` (весь период одним окном или окна подряд без пересечений), `group=month`, `scheme=all` |
 | `accruals-<окно>.json` | `unit_economics_accruals_list`: те же окна, `scheme=all`, `allocate=none` |
 | `assets.json` | `assets_summary_get` (остатки и активы сейчас) |
 | `batches.json` | `cost_batches_list` без `sku` (сверка остатка FBO с журналом партий) |
