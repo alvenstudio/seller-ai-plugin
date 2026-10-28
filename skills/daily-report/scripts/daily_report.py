@@ -5,7 +5,8 @@
 
     python3 daily_report.py --products products.json --plan plan.json \
         [--cpc cpc.json] [--campaign-products c1.json c2.json …] [--cpo cpo.json] \
-        [--previous products_earlier.json] [--strategy strategy.json] [--store-id ID] [--store-name NAME] [--json]
+        [--previous products_earlier.json] [--alerts alerts.json] [--strategy strategy.json] [--store-id ID] \
+        [--store-name NAME] [--json]
 
 --products  ответ promotion_analytics_get со slice=product (все типы продвижения) за день или период;
 --cpc       тот же запрос с types=cpc_search_reco,cpc_search,special — чтобы разделить расход на CPC и CPO;
@@ -14,6 +15,8 @@
             текущая ставка товара в каждой («CPC тек.», у автостратегии — «авто») и цель биддера (`bidder`);
 --cpo       ответ promotion_cpo_products_list: ставка «Оплаты за заказ» товара в % и ₽;
 --previous  более ранний ответ --products за тот же период (промежуточный срез);
+--alerts    ответ promotion_bidder_alerts_list (actionable=true): текущие алерты, которые решает продавец, — аномалии
+            «БИДДЕР ПРОСИТ РЕШЕНИЯ», замолчавший биддер (bidder_silent) — первой строкой;
 --strategy  references/store-promotion-strategies.json (пороги и коридор цели).
 
 Цель товара: в кампании биддера («Целевой общий расход») — его цель в силе (`bidder.target_total_drr`: своя, из плана
@@ -197,8 +200,21 @@ def _label(r):
     return (r.get("name") or r["sku"])[:40].upper()
 
 
-def detect_anomalies(rows, totals, single_day=True, previous=None, data_errors=()):
-    """Аномалии: список {kind, text, impact} по убыванию денег (impact, ₽)."""
+def bidder_alerts(answer):
+    """Текущие алерты биддера, которые решает продавец (promotion_bidder_alerts_list): (вид, текст)."""
+    out = []
+    for a in (answer or {}).get("items") or []:
+        if not a.get("actionable") or a.get("state") != "current":
+            continue
+        where = " — ".join(x for x in (a.get("campaign_title") or f"кампания {a.get('campaign_id')}",
+                                       a.get("name") or a.get("sku")) if x)
+        out.append((a.get("kind"), f"БИДДЕР ПРОСИТ РЕШЕНИЯ: {where}: {a.get('message') or a.get('kind')}"))
+    return out
+
+
+def detect_anomalies(rows, totals, single_day=True, previous=None, data_errors=(), alerts=()):
+    """Аномалии: список {kind, text, impact} по убыванию денег (impact, ₽); замолчавший биддер — первым: кампания
+    крутится на последних ставках без контроля ДРР."""
     found = []
 
     def add(kind, text, impact):
@@ -206,6 +222,8 @@ def detect_anomalies(rows, totals, single_day=True, previous=None, data_errors=(
 
     for err in data_errors:
         add("data", f"ДАННЫЕ НЕПОЛНЫЕ: {err}", 0)
+    for kind, text in alerts:
+        add("bidder_silent" if kind == "bidder_silent" else "bidder", text, 0)
     store_spend = totals["spend"]
     for r in rows:
         spend, revenue, label = r["spend"], r["revenue"], _label(r)
@@ -261,7 +279,7 @@ def detect_anomalies(rows, totals, single_day=True, previous=None, data_errors=(
             if store_drr > store_target + DRR_OVER_TARGET_PCT and overspend >= MIN_OVERSPEND:
                 add("store_overspend", f"ПО МАГАЗИНУ: ДРР {pct(store_drr)} ПРИ ЦЕЛИ {pct(store_target)}, ПЕРЕРАСХОД "
                     f"{money(overspend)} ЗА ДЕНЬ", overspend)
-    found.sort(key=lambda a: -a["impact"])
+    found.sort(key=lambda a: (a["kind"] != "bidder_silent", -a["impact"]))
     return found
 
 
@@ -312,7 +330,8 @@ def observations(rows, totals):
     return out
 
 
-def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None, campaign_products=None, cpo=None):
+def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None, campaign_products=None, cpo=None,
+          alerts=None):
     strategy_all = strategy or {}
     merged = dict(DEFAULT_STRATEGY)
     merged.update(strategy_all.get("default_strategy") or {})
@@ -330,7 +349,7 @@ def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None,
     if (products.get("models") or {}).get("unknown_days"):
         errors.append("ЗАКАЗЫ МОДЕЛЕЙ НЕИЗВЕСТНЫ ЗА " + ", ".join(products["models"]["unknown_days"]))
     prev_rows = build_rows(previous, None, targets, bids) if previous else None
-    anomalies = detect_anomalies(rows, totals, single_day, prev_rows, errors)
+    anomalies = detect_anomalies(rows, totals, single_day, prev_rows, errors, bidder_alerts(alerts))
     for r in rows:
         r["signal"] = signal(r, band) if single_day else None
     return {
@@ -430,6 +449,7 @@ def main(argv=None):
     ap.add_argument("--campaign-products", nargs="*", help="ответы promotion_campaign_products_list")
     ap.add_argument("--cpo", help="ответ promotion_cpo_products_list")
     ap.add_argument("--previous")
+    ap.add_argument("--alerts", help="ответ promotion_bidder_alerts_list (actionable=true)")
     ap.add_argument("--strategy")
     ap.add_argument("--store-id")
     ap.add_argument("--store-name", default="")
@@ -437,7 +457,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     campaigns = [load(f) for f in args.campaign_products] if args.campaign_products is not None else None
     report = build(load(args.products), load(args.plan), load(args.cpc), load(args.previous), load(args.strategy),
-                   args.store_id, campaigns, load(args.cpo))
+                   args.store_id, campaigns, load(args.cpo), load(args.alerts))
     if args.json:
         json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")

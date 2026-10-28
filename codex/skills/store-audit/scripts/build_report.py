@@ -5,7 +5,8 @@
 
     python3 build_report.py --profit profit-2025.json profit-2026.json \
         --accruals accruals-2025.json accruals-2026.json \
-        [--assets assets.json] [--batches batches.json] [--non-pickups np-*.json] [--config audit-config.json] --out report.json
+        [--assets assets.json] [--batches batches.json] [--non-pickups np-*.json] [--seller seller.json] \
+        [--removals removals.json] [--decommissioned dg-*.json] [--config audit-config.json] --out report.json
 
 --profit    ответы economics_profit_get с group=month (окна не длиннее 366 дней, подряд, без пересечений);
 --accruals  ответы unit_economics_accruals_list за те же окна;
@@ -13,6 +14,9 @@
 --batches   ответ cost_batches_list без sku (сверка остатка FBO с журналом партий);
 --non-pickups  страницы finance_accruals_list с type_ids=6,40,59 за период: невыкупы и возвраты — уникальные отправления
             (unit_number) и сумма этих услуг; без них — non_pickup_count конфига (строк, а не отправлений);
+--seller    ответ stores_seller_info_get: юрлицо, ИНН и система налогообложения Ozon на обложку;
+--removals  ответы removals_list за период (date_from, date_to; хватает limit=1 — нужны totals и coverage): вывоз со складов;
+--decommissioned  страницы decommissioned_goods_list за период (все, limit 500): причины списаний и списанное по товарам;
 --config    {"store_name": "…", "extra": [{"label", "amount", "note"}], "non_pickup_count": N}.
 """
 import argparse
@@ -253,7 +257,79 @@ def non_pickups(pages):
     return {"count": len(units), "rows": len(seen), "accruals_amount": round(amount, 2), "basis": "postings"}
 
 
-def build(profit_answers, accrual_answers, assets=None, batches=None, config=None, non_pickup_pages=None):
+def seller_part(seller):
+    """Реквизиты продавца (stores_seller_info_get): юрлицо, ИНН, система налогообложения Ozon; None — не прочитаны."""
+    company = (seller or {}).get("company")
+    if not company:
+        return None
+    return {"legal_name": company.get("legal_name") or company.get("name"), "inn": company.get("inn"),
+            "tax_system": company.get("tax_system")}
+
+
+def _merge_counts(into, rows, key, fields):
+    """Строки «по состоянию» нескольких ответов — в одну: состояния сравниваются без учёта регистра и «ё»."""
+    for r in rows or []:
+        state = r.get(key)
+        norm = (state or "").strip().lower().replace("ё", "е")
+        entry = into.setdefault(norm, {key: state, **{f: 0 for f in fields}})
+        for f in fields:
+            entry[f] += int(r.get(f) or 0)
+
+
+def removals_part(answers):
+    """Вывоз со складов за период — итоги removals_list (одного ответа или окон без пересечений)."""
+    if not answers:
+        return None
+    out = {k: 0 for k in ("units", "requests", "boxes", "given_out_units", "utilized_units")}
+    by_state, by_box, by_type, complete = {}, {}, {}, True
+    for a in answers:
+        t = a.get("totals") or {}
+        for k in out:
+            out[k] += int(t.get(k) or 0)
+        _merge_counts(by_state, t.get("by_state"), "state", ("requests", "units"))
+        _merge_counts(by_box, t.get("by_box_state"), "state", ("boxes", "units"))
+        _merge_counts(by_type, t.get("by_stock_type"), "stock_type", ("units",))
+        complete = complete and (a.get("coverage") or {}).get("complete") is True
+    def by_units(rows):
+        return sorted(rows.values(), key=lambda r: -r["units"])
+
+    return dict(out, by_state=by_units(by_state), by_box_state=by_units(by_box), by_stock_type=by_units(by_type),
+                complete=complete)
+
+
+def decommissioned_part(pages):
+    """Списанные товары за период (decommissioned_goods_list): итоги по причинам — из totals ответа, по товарам — из
+    строк всех страниц; страницы одного запроса (те же фильтры), totals у них одинаковые."""
+    if not pages:
+        return None
+    t = pages[0].get("totals") or {}
+    by_product = collections.OrderedDict()
+    rows = 0
+    for page in pages:
+        for r in page.get("items") or []:
+            rows += 1
+            key = r.get("sku") or r.get("offer_id")
+            entry = by_product.setdefault(key, {"offer_id": r.get("offer_id") or r.get("sku"), "name": r.get("name"),
+                                                "qty": 0, "fee": 0.0, "compensation": 0.0})
+            entry["qty"] += int(r.get("quantity") or 0)
+            entry["fee"] += zero(r.get("disposal_fee"))
+            entry["compensation"] += zero(r.get("compensation_price"))
+    return {
+        "quantity": int(t.get("quantity") or 0),
+        "fee": zero(t.get("disposal_fee")),
+        "compensation": zero(t.get("compensation_price")),
+        "by_reason": [{"reason": r.get("reason"), "label": r.get("reason_label") or r.get("reason") or "не указана",
+                       "qty": int(r.get("quantity") or 0), "fee": zero(r.get("disposal_fee")),
+                       "compensation": zero(r.get("compensation_price"))} for r in t.get("by_reason") or []],
+        "by_product": sorted(by_product.values(), key=lambda x: -x["qty"]),
+        "rows": rows,
+        "total": int(pages[0].get("total") or rows),
+        "complete": (pages[0].get("coverage") or {}).get("complete") is True,
+    }
+
+
+def build(profit_answers, accrual_answers, assets=None, batches=None, config=None, non_pickup_pages=None,
+          seller=None, removal_answers=None, decommissioned_pages=None):
     config = config or {}
     p = merge_profit(profit_answers)
     items, reconciliation = merge_accruals(accrual_answers)
@@ -295,13 +371,22 @@ def build(profit_answers, accrual_answers, assets=None, batches=None, config=Non
     mb = material_balance(batches)
     if mb and mb["unknown_cost_units"]:
         warnings.append(f"расхождение партий без себестоимости: {mb['unknown_cost_units']} шт — не оценено в рублях")
+    removals = removals_part(removal_answers)
+    if removals and not removals["complete"]:
+        warnings.append("вывоз: Seller AI прочитал из Ozon не все кварталы периода (coverage.complete) — цифры вывоза неполные")
+    decommissioned = decommissioned_part(decommissioned_pages)
+    if decommissioned and not decommissioned["complete"]:
+        warnings.append("списанные товары: Seller AI прочитал из Ozon не все дни периода (coverage.complete) — список неполный")
+    if decommissioned and decommissioned["rows"] < decommissioned["total"]:
+        warnings.append(f"списанное по товарам — по {decommissioned['rows']} из {decommissioned['total']} строк: "
+                        "передайте все страницы decommissioned_goods_list")
     for w in p["warnings"]:
         warnings.append(str(w))
     returns_logistics = p["categories"].get("returns_logistics", 0.0)
     return {
         "meta": {"store_id": config.get("store_id"), "store_name": config.get("store_name"),
                  "date_from": p["period"]["from"], "date_to": p["period"]["to"], "scheme": p["scheme"],
-                 "cost_method": p["cost_method"], "tax": p["tax"]},
+                 "cost_method": p["cost_method"], "tax": p["tax"], "seller": seller_part(seller)},
         "months": p["months"],
         "totals": totals,
         "services": {"by_category": by_category, "detail": detail},
@@ -312,6 +397,8 @@ def build(profit_answers, accrual_answers, assets=None, batches=None, config=Non
                            **(non_pickups(non_pickup_pages) if non_pickup_pages else {})),
         "stock": assets_part(assets),
         "material_balance": mb,
+        "removals": removals,
+        "decommissioned": decommissioned,
         "unallocated": q["unallocated"],
         "extra": config.get("extra", []),
         "warnings": warnings,
@@ -325,13 +412,19 @@ def main(argv=None):
     ap.add_argument("--assets")
     ap.add_argument("--batches")
     ap.add_argument("--non-pickups", nargs="*")
+    ap.add_argument("--seller")
+    ap.add_argument("--removals", nargs="*")
+    ap.add_argument("--decommissioned", nargs="*")
     ap.add_argument("--config")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
     report = build([load(f) for f in args.profit], [load(f) for f in args.accruals],
                    load(args.assets) if args.assets else None, load(args.batches) if args.batches else None,
                    load(args.config) if args.config else None,
-                   [load(f) for f in args.non_pickups] if args.non_pickups else None)
+                   [load(f) for f in args.non_pickups] if args.non_pickups else None,
+                   load(args.seller) if args.seller else None,
+                   [load(f) for f in args.removals] if args.removals else None,
+                   [load(f) for f in args.decommissioned] if args.decommissioned else None)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     t = report["totals"]

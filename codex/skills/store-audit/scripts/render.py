@@ -197,8 +197,10 @@ def build_slides(rep):
     name = meta.get("store_name") or meta.get("store_id") or ""
     initials = "".join(w[0] for w in str(name).split()[:2]).upper() or "OZ"
     period = f'{meta.get("date_from", "")} — {meta.get("date_to", "")}'
+    seller = meta.get("seller") or {}
+    who = " · ".join(x for x in (seller.get("legal_name"), f'ИНН {seller["inn"]}' if seller.get("inn") else None) if x)
     brand = (f'<div class="brand"><div class="mark">{e(initials)}</div>'
-             f'<div><b>{e(name)}</b><span>Ozon · {e(period)}</span></div></div>')
+             f'<div><b>{e(name)}</b><span>{e(who + " · ") if who else ""}Ozon · {e(period)}</span></div></div>')
     slides = []
     sales = tot["sales"]
 
@@ -323,6 +325,23 @@ def build_slides(rep):
 <p class="note">Себестоимость списанного товара — прямой убыток сверх сбора Ozon за утилизацию
 ({n(rep["disposal"]["fee"])} ₽ за период).</p>""")
 
+    # причины списаний («Списанные товары» Ozon)
+    dg = rep.get("decommissioned")
+    if dg and dg.get("by_reason"):
+        trs = "".join(f'<tr><td>{e(r["label"])}</td><td class="q">{n(r["qty"])}</td>'
+                      f'<td class="pos">{n(r["compensation"])}</td><td class="neg">{n(-r["fee"])}</td></tr>'
+                      for r in dg["by_reason"][:10])
+        top = ", ".join(f'{x["offer_id"]} — {n(x["qty"])} шт' for x in dg["by_product"][:3])
+        slides.append(f"""
+<p class="kicker">Списанные товары Ozon</p>
+<h2>Почему<br>списали <span class="chip">{n(dg["quantity"])}</span></h2>
+<table><thead><tr><th>Причина</th><th>Штук</th><th>Компенсация</th><th>Утилизация</th></tr></thead>
+<tbody>{trs}<tr class="total"><td>Итого</td><td class="q">{n(dg["quantity"])}</td>
+<td class="pos">{n(dg["compensation"])}</td><td class="neg">{n(-dg["fee"])}</td></tr></tbody></table>
+<p class="note">Причины — слова Ozon из отчёта «Списанные товары». Компенсация — то, что Ozon выплатил или обещал за
+списанное по своей вине; утилизация — начисление за неё. Деньги — в начислениях, этот слайд — их причины.
+{e("Больше всего: " + top + ".") if top else ""}</p>""")
+
     # прибыль с единицы по товарам
     ue = rep.get("unit_economics") or []
     if ue:
@@ -360,6 +379,23 @@ def build_slides(rep):
 </div>
 <p class="note">Невыкуп — покупатель не забрал заказ: выручки нет, а логистика списывается; {avg}
 Вывоз — товар, который вы забираете со складов Ozon; он остаётся вашим активом.</p>""")
+
+    # вывоз со складов («Вывоз и утилизация»)
+    rm = rep.get("removals")
+    if rm and rm.get("units"):
+        trs = "".join(f'<tr><td>{e(r["state"] or "не указан")}</td><td class="q">{n(r["boxes"])}</td>'
+                      f'<td class="q">{n(r["units"])}</td></tr>' for r in rm["by_box_state"][:8])
+        slides.append(f"""
+<p class="kicker">Вывоз и утилизация FBO</p>
+<h2>Забрано<br><span class="chip">{n(rm["given_out_units"])}</span> из {n(rm["units"])}</h2>
+<div class="tiles">
+  <div class="tile"><div class="v">{n(rm["requests"])}</div><div class="l">заявок на вывоз за период</div></div>
+  <div class="tile"><div class="v">{n(rm["given_out_units"])}</div><div class="l">единиц выдано вам</div></div>
+  <div class="tile"><div class="v">{n(rm["utilized_units"])}</div><div class="l">единиц утилизировано</div></div>
+</div>
+<table><thead><tr><th>Состояние коробки</th><th>Коробок</th><th>Штук</th></tr></thead><tbody>{trs}</tbody></table>
+<p class="note">Заявки со стока и с поставок, созданные за период. Что не выдано и не утилизировано, ещё едет или ждёт вас
+на складе: заберите, пока Ozon не утилизировал.</p>""")
 
     # остатки по кластерам
     if st.get("total"):
@@ -423,7 +459,8 @@ def render_html(rep, slides, out_path):
            f"<title>Аудит {e(name)}</title>\n<style>{DECK_CSS}</style>\n"
            f'<div class="deck">{body}</div>\n'
            f'<div class="foot"><p>Источник — Seller AI: отчёт «Чистая прибыль» и «Юнит-экономика → По начислениям» '
-           f'(итог сходится с «Начислениями» до копейки), «Активы» и партии поставок FBO.</p>'
+           f'(итог сходится с «Начислениями» до копейки), «Активы», партии поставок FBO, «Вывоз и утилизация» и '
+           f'«Списанные товары».</p>'
            f'{"<ul>" + warn + "</ul>" if warn else ""}</div>')
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(doc)

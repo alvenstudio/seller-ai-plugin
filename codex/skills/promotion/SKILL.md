@@ -34,6 +34,7 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
 | «Оплата за заказ: все товары» | `promotion_cpo_all_get` | `state`, `state_since`, `bid {value}` (5 / 7 / 9 %), `stats {expense, revenue, drr, active_days}` |
 | Расход по дням и кампаниям («Детализация расходов») | `promotion_expenses_get` (`types=cpc,cpo_selected,cpo_all`) | `items[] {date, campaign_id, title, type, money_spent, bonus_spent}`, `totals`, `missing` (дни, которые Ozon ещё не отдал) |
 | Кто и что менял | `promotion_history_list` (`campaign_id`, `section=cpc\|cpo\|external`) | `items[] {at, source: seller_ai\|ozon, event, details}` |
+| Алерты биддера и проверок Seller AI | `promotion_bidder_alerts_list` (`state=current\|open\|all`, `actionable`, `kinds`, `campaign_id`, `sku`, `date_from`, `date_to`) | `items[] {kind, scope, actionable, state, campaign_title, sku, name, message, details, raised_at, last_seen_at}`, `kinds[]` — счётчики |
 | Наши операции | `promotion_operations_list`, `promotion_operations_get` | статус команды (ниже) |
 
 **Какой ДРР где.** Общий ДРР товара по всем видам рекламы — `promotion_analytics_get` со `slice=product`, `metrics.drr` (база — `gmv`
@@ -74,6 +75,13 @@ FBO + FBS, gross, по цене продавца). «ДРР в продвиже�
   `bidder_silent`: нет прохода больше 15 минут — кампания крутится на последних ставках без контроля ДРР), `breaker_state`
   (`paused_by_breaker` — биддер остановил кампанию, потому что не работает ключ Seller, и включит сам), `unacked_alerts`,
   `paused_products`. Сводные алерты биддера магазина — пункт `bidder_alert` в `attention` у `home_summary_get` (`parts=now`).
+- **Алерты** — `promotion_bidder_alerts_list`: по умолчанию текущие (открыты и подняты снова за 24 часа — то, что держится сейчас),
+  `state=open` — и устаревшие (давно не поднимались: скорее всего, уже не держатся), `state=all` — и закрытые (история).
+  `actionable: true` — решает продавец (`bidder_silent`, `strategy_changed`, `campaign_dark`, `external_bid_fight`, `double_run`,
+  `pause_failed`, `infeasible`, `target_unreachable`, `floor_overshoot`, `ad_drr_ceiling`): их — первыми, с `message` и тем, что
+  сделать; остальные — рабочие заметки биддера (перерасход и снижение ставки, защитный режим, обучение), он справляется сам —
+  пересказывать, только если спросили. `ads_suspended` — Ozon приостановил рекламу магазина (`details.since`), `ads_restored` —
+  доступ вернулся, а выключенные Ozon кампании ещё стоят. Отметить алерт прочитанным нельзя: его закрывают биддер и проверки.
 - **Товар** — `bidder` в `promotion_campaign_products_list`: `target_total_drr` (цель в силе, %), `target_source` (`manual`, `plan`,
   `ramp`), `manual_target_total_drr`, `plan {drr, usable}`, `ramp {units, target_total_drr, sold, left}`, `learning {active,
   settled_days, needed_days}` (обучение: 4 устоявшихся дня после смены цели, пока их меньше — ставка не меняется), `status` (`new`,
