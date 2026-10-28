@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Грузоместа поставки FBO — чистый расчёт над ответом `supplies_orders_get`; ничего не вызывает.
 
-Готовит `body` для `supplies_cargoes_set` (полный набор мест поставки; в ответе — поле `body` и сводка
-`summary`) и, где нужно, `body` нового состава для `supplies_supply_items_set` (`items_body`).
+Готовит `body` для `supplies_cargoes_set` (в ответе — поле `body` и сводка `summary`): полный набор мест поставки
+(`mode: replace`), только новые места рядом с прежними (`mode: add`) или удаление выбранных мест (`mode: delete`, прочие
+места сохраняют номера, этикетки и «Годен до»), и, где нужно, `body` нового состава для `supplies_supply_items_set`
+(`items_body`).
 
     python3 cargo_plan.py layout   in.json   # места поставки из количества и фасовки → body
     python3 cargo_plan.py boxplan  in.json   # округлить заявку по имеющимся коробкам (один размер на поставку,
                                              #   с allow_mixed — и смешанно, если по одному размеру не выходит)
-    python3 cargo_plan.py remove   in.json   # убрать места по cargo_id → новый набор, затем новое количество
-    python3 cargo_plan.py add      in.json   # добавить места к поставке → новый набор и новое количество
+    python3 cargo_plan.py remove   in.json   # убрать места по cargo_id → удаление этих мест, затем новое количество
+    python3 cargo_plan.py add      in.json   # добавить места к поставке → новое количество, затем новые места
     python3 cargo_plan.py check    in.json   # сверка мест с составом поставок заявки
 
 Входы (JSON-файл или - для stdin):
@@ -19,9 +21,10 @@
             "allow_mixed": false, "expires": "2027-02-25" | {"12": "…", "10": "…"}}
            или {"supplies": [...], "box_size": 12} — общий объём округляется до целых коробок;
            allow_mixed — коробки разных размеров в одной поставке, только при одном сроке годности
-  remove:  {"order": <ответ supplies_orders_get>, "cargo_ids": ["…"], "expires": … , "keep_quantity": false}
+  remove:  {"order": <ответ supplies_orders_get>, "cargo_ids": ["…"], "keep_quantity": false,
+            "replace": false, "expires": …}   # replace: true — прежний путь, новый полный набор (нужен срок)
   add:     {"order": <ответ supplies_orders_get>, "supply_id": "…", "sku": "…",
-            "places": [{"type": "BOX", "quantity": 8}], "expires": …}
+            "places": [{"type": "BOX", "quantity": 8}], "expires": …}   # срок — у новых мест
   check:   {"order": <ответ supplies_orders_get>}
 """
 import argparse
@@ -82,7 +85,7 @@ def _expires_for(expires, qty):
     raise CargoError(f"Нет срока годности для мест по {qty} шт: назовите срок для каждого размера")
 
 
-def body(sku, place_list, expires=None, expected_cargo_ids=(), max_boxes=30, max_pallets=40):
+def body(sku, place_list, expires=None, expected_cargo_ids=(), max_boxes=30, max_pallets=40, mode=None):
     boxes = sum(1 for p in place_list if p["type"] == "BOX")
     pallets = sum(1 for p in place_list if p["type"] == "PALLET")
     if boxes > max_boxes or pallets > max_pallets:
@@ -95,7 +98,10 @@ def body(sku, place_list, expires=None, expected_cargo_ids=(), max_boxes=30, max
         items = p.get("items") or [{"sku": str(sku), "quantity": p["quantity"]}]
         exp = _expires_for(expires, p["quantity"])
         cargoes.append({"type": p["type"], "items": [dict(i, expires_at=exp) if exp else dict(i) for i in items]})
-    return {"body": {"cargoes": cargoes, "expected": {"cargo_ids": [str(c) for c in expected_cargo_ids]}},
+    out = {"cargoes": cargoes, "expected": {"cargo_ids": [str(c) for c in expected_cargo_ids]}}
+    if mode:
+        out = {"mode": mode, **out}
+    return {"body": out,
             "summary": {"boxes": boxes, "pallets": pallets, "units": sum(p["quantity"] for p in place_list),
                         "units_per_place": sorted({p["quantity"] for p in place_list})}}
 
@@ -260,12 +266,20 @@ def remove(data):
         new_comp = {k: v - removed.get(k, 0) for k, v in comp.items()}
         if any(v < 0 for v in new_comp.values()):
             raise CargoError(f"Поставка {sid}: убираем больше, чем в составе")
-        cargo_body = body(None, [_place(c) for c in keep], data.get("expires"), [c["cargo_id"] for c in mine])
+        gone = sorted(str(c["cargo_id"]) for c in mine if str(c["cargo_id"]) in ids)
+        if data.get("replace"):
+            cargo_body = body(None, [_place(c) for c in keep], data.get("expires"), [c["cargo_id"] for c in mine])
+        else:
+            # Только выбранные места: прочие сохраняют номера, этикетки и «Годен до» (`mode: delete`).
+            cargo_body = {"body": {"mode": "delete", "cargo_ids": gone,
+                                   "expected": {"cargo_ids": [str(c["cargo_id"]) for c in mine]}},
+                          "summary": {"deleted": len(gone), "left": len(keep),
+                                      "units_left": sum(_place(c)["quantity"] for c in keep)}}
         result.append({"supply_id": sid, "cargoes_body": cargo_body,
                        "items_body": None if data.get("keep_quantity") else _items_body(supply, new_comp),
                        "quantity": {"before": comp, "after": new_comp, "removed": removed},
-                       "removed_cargo_ids": sorted(str(c["cargo_id"]) for c in mine if str(c["cargo_id"]) in ids)})
-    return {"supplies": result, "warnings": _expiry_warning(data),
+                       "removed_cargo_ids": gone})
+    return {"supplies": result, "warnings": _expiry_warning(data) if data.get("replace") else [],
             "order": "сначала места (cargoes_body), после их succeeded — перечитать заявку и состав (items_body, "
                      "expected.bundle_id из свежего чтения): мест меньше состава Seller AI принимает, а поднять состав "
                      "у поставки с местами Ozon не даёт"}
@@ -282,9 +296,12 @@ def add(data):
     added = sum(p["quantity"] for p in new)
     new_comp = dict(comp)
     new_comp[str(data["sku"])] = new_comp.get(str(data["sku"]), 0) + added
-    cargo_body = body(None, [_place(c) for c in mine] + new, data.get("expires"), [c["cargo_id"] for c in mine])
+    # Только новые места рядом с прежними (`mode: add`): прежние сохраняют номера, этикетки и «Годен до».
+    cargo_body = body(None, new, data.get("expires"), [c["cargo_id"] for c in mine], mode="add")
+    warnings = [] if data.get("expires") else ["Срок годности не задан: у новых мест его не будет (Ozon его не "
+                                               "отдаёт и не печатает). Спросите срок у пользователя"]
     return {"supply_id": sid, "items_body": _items_body(supply, new_comp), "cargoes_body": cargo_body,
-            "quantity": {"before": comp, "after": new_comp}, "warnings": _expiry_warning(data) + [
+            "quantity": {"before": comp, "after": new_comp}, "warnings": warnings + [
                 "Увеличение количества проходит только пока у поставки нет грузомест; после — INBOUND_NO_CAPACITY"]}
 
 
