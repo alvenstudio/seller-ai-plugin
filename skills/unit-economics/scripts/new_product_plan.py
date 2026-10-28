@@ -12,7 +12,8 @@ product.json — то, что известно о товаре: price, cost, vol
 references/commissions-*.tsv навыка category-commissions или stores_commission_rules_list), при желании любые другие входы
 формулы (buyout, last_mile, supply_cost …).
 --plan      ответ unit_economics_plan_list магазина: входы, которых нет в product.json, берутся медианой по строкам магазина
-            (как значение магазина в Seller AI);
+            (как значение магазина в Seller AI); кросс-докинг (supply_cost) растёт с объёмом — объём товара × медиана
+            «supply_cost ÷ volume_liters» строк магазина, без таких строк — объём × 15 ₽;
 --settings  ответ stores_economics_settings_get: налог, база, НДС, выкуп по умолчанию, прочие расходы, звёздные, досрочная;
 --formula   formula_schema из ответа unit_economics_plan_list (по умолчанию — копия в references);
 --clusters  кластеры, где будет лежать товар (по умолчанию — идеальная раскладка: товар в каждом кластере).
@@ -45,10 +46,11 @@ DEFAULTS = {
     "early_payout_rate": 0.0, "points_share": 0.0, "tax_rate": None, "vat_rate": 0.0, "tax_on_sales": 0,
     "tax_on_profit": 0,
 }
-# Входы, которые разумно брать значением магазина (медиана строк его плана).
+# Входы, которые разумно брать значением магазина (медиана строк его плана). Кросс-докинг — отдельно: на литр.
 STORE_PRIOR_INPUTS = ("buyout", "cancel_before_ship", "last_mile", "return_processing", "acquiring_rate", "points_share",
                       "disposal_share", "disposal_fee", "stars_rate", "early_payout_rate", "insurance_rate",
-                      "other_ozon_fees", "supply_cost")
+                      "other_ozon_fees")
+CROSS_DOCKING_PER_LITER = 15.0  # ₽ за литр, когда у магазина нет принятых поставок
 
 
 # ── справочник тарифов ────────────────────────────────────────────────
@@ -222,6 +224,17 @@ def store_priors(plan):
     return out
 
 
+def supply_cost_per_liter(plan):
+    """Медиана кросс-докинга на литр по строкам плана магазина (оба поля в inputs, больше нуля); None — таких нет."""
+    vals = []
+    for r in (plan or {}).get("items") or []:
+        i = r.get("inputs") or {}
+        cost, vol = i.get("supply_cost"), i.get("volume_liters")
+        if cost is not None and vol is not None and float(cost) > 0 and float(vol) > 0:
+            vals.append(float(cost) / float(vol))
+    return statistics.median(vals) if vals else None
+
+
 def settings_inputs(settings):
     if not settings:
         return {}
@@ -246,6 +259,11 @@ def build_inputs(product, plan=None, settings=None, clusters=None, tariffs=None,
         for k, v in layer.items():
             inputs[k] = v
             sources[k] = name
+    if "supply_cost" not in product and product.get("volume_liters") is not None:
+        per_liter = supply_cost_per_liter(plan)
+        rate, src = (per_liter, "store_per_liter") if per_liter is not None else (CROSS_DOCKING_PER_LITER, "default_per_liter")
+        inputs["supply_cost"] = round(float(product["volume_liters"]) * rate, 2)
+        sources["supply_cost"] = src
     logistics = None
     need = [k for k in ("logistics_lt_300", "logistics_gte_300") if k not in product]
     if need:

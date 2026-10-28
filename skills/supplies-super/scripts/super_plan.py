@@ -3,6 +3,7 @@
 
     python3 super_plan.py allocate  in.json  # {"total", "box_size", "shares": {cluster_id: доля}} → штуки по кластерам
     python3 super_plan.py calendar  in.json  # {"answers": [ответы supplies_drafts_timeslots_list], "date_from", "date_to"}
+                                             #  или {"plans": [{"name", "answers"}], …} — общий календарь заявок серии
     python3 super_plan.py check     in.json  # {"calculation": draft.calculation, "plan": {cluster_id: {sku: штук}},
                                              #  "require_super": true} → принято ли ровно запланированное
     python3 super_plan.py order     in.json  # {"order": ответ supplies_orders_get, "plan": …, "dropoff_id"} → сверка заявки
@@ -94,17 +95,45 @@ def calendar_metrics(answers, date_from, date_to):
         missing = [start + timedelta(days=i) for i in range(span) if start + timedelta(days=i) not in covered]
         if missing:
             raise SuperError(f"Окна ответов не покрывают период: нет {missing[0].isoformat()}")
+    return dict(_day_metrics(slots_by_day, start, end), timezones=sorted(z for z in zones if z))
+
+
+def _day_metrics(slots_by_day, start, end):
+    span = (end - start).days + 1
     available = sorted(slots_by_day)
     longest = current = 0
     for i in range(span):
         current = 0 if start + timedelta(days=i) in slots_by_day else current + 1
         longest = max(longest, current)
     weeks = Counter(f"{d.isocalendar().year}-W{d.isocalendar().week:02}" for d in available)
-    return {"date_from": start.isoformat(), "date_to": end.isoformat(), "timezones": sorted(z for z in zones if z),
+    return {"date_from": start.isoformat(), "date_to": end.isoformat(),
             "window_days": span, "available_days": len(available), "coverage": round(len(available) / span, 3),
             "available_dates": [d.isoformat() for d in available],
             "unique_slots": sum(len(s) for s in slots_by_day.values()),
             "longest_gap_days": longest, "days_per_week": dict(sorted(weeks.items()))}
+
+
+def common_calendar(plans, date_from, date_to):
+    """Общий календарь нескольких заявок серии: день годится, когда слот есть у каждой заявки (пересечение дней).
+    `same_slot_days` — дни, где у всех есть одинаковый слот «с–по» (одна точка отгрузки — одна дата для всех)."""
+    if not plans:
+        raise SuperError("Нет планов")
+    start, end = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    each, shared = [], None
+    for i, plan in enumerate(plans):
+        answers = plan.get("answers")
+        m = calendar_metrics(answers, date_from, date_to)
+        each.append(dict(m, name=plan.get("name") or f"заявка {i + 1}"))
+        mine = {}
+        for a in answers if isinstance(answers, list) else [answers]:
+            for day in a["days"]:
+                d = date.fromisoformat(day["date"])
+                if start <= d <= end and day["slots"]:
+                    mine.setdefault(d, set()).update((x["from"], x["to"]) for x in day["slots"])
+        shared = mine if shared is None else {d: shared[d] & mine[d] for d in shared.keys() & mine.keys()}
+    common = _day_metrics(shared, start, end)
+    common["same_slot_days"] = sum(1 for v in shared.values() if v)
+    return {"plans": each, "common": common}
 
 
 def check_calculation(calc, plan, require_super=False):
@@ -172,6 +201,8 @@ def main():
     try:
         if a.command == "allocate":
             r = allocate_boxes(d["total"], d["box_size"], d["shares"])
+        elif a.command == "calendar" and d.get("plans"):
+            r = common_calendar(d["plans"], d["date_from"], d["date_to"])
         elif a.command == "calendar":
             r = calendar_metrics(d["answers"], d["date_from"], d["date_to"])
         elif a.command == "check":

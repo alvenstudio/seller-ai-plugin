@@ -5,12 +5,14 @@
 
     python3 build_report.py --profit profit-2025.json profit-2026.json \
         --accruals accruals-2025.json accruals-2026.json \
-        [--assets assets.json] [--batches batches.json] [--config audit-config.json] --out report.json
+        [--assets assets.json] [--batches batches.json] [--non-pickups np-*.json] [--config audit-config.json] --out report.json
 
 --profit    ответы economics_profit_get с group=month (окна не длиннее 366 дней, подряд, без пересечений);
 --accruals  ответы unit_economics_accruals_list за те же окна;
 --assets    ответ assets_summary_get (остатки и активы сейчас);
 --batches   ответ cost_batches_list без sku (сверка остатка FBO с журналом партий);
+--non-pickups  страницы finance_accruals_list с type_ids=6,40,59 за период: невыкупы и возвраты — уникальные отправления
+            (unit_number) и сумма этих услуг; без них — non_pickup_count конфига (строк, а не отправлений);
 --config    {"store_name": "…", "extra": [{"label", "amount", "note"}], "non_pickup_count": N}.
 """
 import argparse
@@ -236,7 +238,22 @@ def material_balance(batches):
     }
 
 
-def build(profit_answers, accrual_answers, assets=None, batches=None, config=None):
+def non_pickups(pages):
+    """Невыкупы и возвраты по строкам начислений 6, 40, 59: уникальные отправления и сумма услуг; повторы строк страниц — раз."""
+    seen, units, amount = set(), set(), 0.0
+    for page in pages:
+        for r in page.get("items") or []:
+            key = r.get("accrual_id") or (r.get("unit_number"), r.get("type_id"), r.get("date"), r.get("amount"))
+            if key in seen:
+                continue
+            seen.add(key)
+            amount += float(r.get("amount") or 0)
+            if r.get("unit_number"):
+                units.add(str(r["unit_number"]))
+    return {"count": len(units), "rows": len(seen), "accruals_amount": round(amount, 2), "basis": "postings"}
+
+
+def build(profit_answers, accrual_answers, assets=None, batches=None, config=None, non_pickup_pages=None):
     config = config or {}
     p = merge_profit(profit_answers)
     items, reconciliation = merge_accruals(accrual_answers)
@@ -290,7 +307,9 @@ def build(profit_answers, accrual_answers, assets=None, batches=None, config=Non
         "services": {"by_category": by_category, "detail": detail},
         "disposal": {"by_product": disposal_rows, "fee": -p["categories"].get("disposal", 0.0)},
         "unit_economics": unit_economics(items),
-        "non_pickup": {"amount": returns_logistics, "count": config.get("non_pickup_count")},
+        "non_pickup": dict({"amount": returns_logistics, "count": config.get("non_pickup_count"),
+                            "basis": "rows" if config.get("non_pickup_count") is not None else None},
+                           **(non_pickups(non_pickup_pages) if non_pickup_pages else {})),
         "stock": assets_part(assets),
         "material_balance": mb,
         "unallocated": q["unallocated"],
@@ -305,12 +324,14 @@ def main(argv=None):
     ap.add_argument("--accruals", nargs="+", required=True)
     ap.add_argument("--assets")
     ap.add_argument("--batches")
+    ap.add_argument("--non-pickups", nargs="*")
     ap.add_argument("--config")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
     report = build([load(f) for f in args.profit], [load(f) for f in args.accruals],
                    load(args.assets) if args.assets else None, load(args.batches) if args.batches else None,
-                   load(args.config) if args.config else None)
+                   load(args.config) if args.config else None,
+                   [load(f) for f in args.non_pickups] if args.non_pickups else None)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     t = report["totals"]

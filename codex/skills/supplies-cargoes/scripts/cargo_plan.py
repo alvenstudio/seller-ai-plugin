@@ -5,8 +5,9 @@
 `summary`) и, где нужно, `body` нового состава для `supplies_supply_items_set` (`items_body`).
 
     python3 cargo_plan.py layout   in.json   # места поставки из количества и фасовки → body
-    python3 cargo_plan.py boxplan  in.json   # округлить заявку по имеющимся коробкам (один размер на поставку)
-    python3 cargo_plan.py remove   in.json   # убрать места по cargo_id → новый набор и новое количество
+    python3 cargo_plan.py boxplan  in.json   # округлить заявку по имеющимся коробкам (один размер на поставку,
+                                             #   с allow_mixed — и смешанно, если по одному размеру не выходит)
+    python3 cargo_plan.py remove   in.json   # убрать места по cargo_id → новый набор, затем новое количество
     python3 cargo_plan.py add      in.json   # добавить места к поставке → новый набор и новое количество
     python3 cargo_plan.py check    in.json   # сверка мест с составом поставок заявки
 
@@ -14,8 +15,10 @@
   layout:  {"sku": "…", "quantity": 960, "box_size": 20, "pallet_size": 600 | null,
             "breakdown": {"20": 30, "12": 5} | null, "expires": "2027-02-25" | {"20": "2027-02-25"},
             "expected_cargo_ids": [], "max_boxes": 30, "max_pallets": 40}
-  boxplan: {"supplies": [{"supply_id": "…", "quantity": 96}], "inventory": {"12": 70, "10": 26}}
-           или {"supplies": [...], "box_size": 12} — общий объём округляется до целых коробок
+  boxplan: {"supplies": [{"supply_id": "…", "quantity": 96}], "inventory": {"12": 70, "10": 26},
+            "allow_mixed": false, "expires": "2027-02-25" | {"12": "…", "10": "…"}}
+           или {"supplies": [...], "box_size": 12} — общий объём округляется до целых коробок;
+           allow_mixed — коробки разных размеров в одной поставке, только при одном сроке годности
   remove:  {"order": <ответ supplies_orders_get>, "cargo_ids": ["…"], "expires": … , "keep_quantity": false}
   add:     {"order": <ответ supplies_orders_get>, "supply_id": "…", "sku": "…",
             "places": [{"type": "BOX", "quantity": 8}], "expires": …}
@@ -136,8 +139,9 @@ def _closest_subset(targets, goal):
     return chosen
 
 
-def box_plan(supplies, inventory=None, box_size=None):
-    """{supply_id: {размер: коробок}}; все коробки инвентаря расходятся, у поставки один размер."""
+def box_plan(supplies, inventory=None, box_size=None, allow_mixed=False, expires=None):
+    """{supply_id: {размер: коробок}}; все коробки инвентаря расходятся, у поставки один размер (allow_mixed — если по
+    одному размеру не раскладывается, коробки смешиваются в поставке; при разных сроках по размерам — нельзя)."""
     qty = {str(s["supply_id"]): int(s["quantity"]) for s in supplies if int(s["quantity"]) > 1}
     if not qty:
         raise CargoError("Нет поставок с количеством больше 1 шт")
@@ -149,6 +153,38 @@ def box_plan(supplies, inventory=None, box_size=None):
         raise CargoError(f"Поставок {len(qty)}, а коробок {sum(inv.values())}: каждой нужна хотя бы одна")
     scale = sum(s * n for s, n in inv.items()) / sum(qty.values())
     target = {sid: q * scale for sid, q in qty.items()}
+    skipped = [str(s["supply_id"]) for s in supplies if int(s["quantity"]) <= 1]
+    try:
+        return _single_size_plan(qty, inv, target, skipped)
+    except CargoError:
+        if not allow_mixed:
+            raise
+        if isinstance(expires, dict) and len({str(v) for v in expires.values()}) > 1:
+            raise CargoError("Сроки годности у размеров разные — смешивать размеры в поставке нельзя: "
+                             "задайте раскладку сами") from None
+        return _mixed_plan(qty, inv, target, skipped)
+
+
+def _mixed_plan(qty, inv, target, skipped):
+    """Каждую коробку (от больших к меньшим) — поставке с наибольшей недостачей до цели; у каждой хотя бы одна."""
+    got = {sid: [] for sid in qty}
+    for size in sorted((s for s, n in inv.items() for _ in range(n)), reverse=True):
+        sid = max(got, key=lambda k: (target[k] - sum(got[k]), target[k], k))
+        got[sid].append(size)
+    for sid in [k for k in got if not got[k]]:
+        donor = max((k for k in got if len(got[k]) > 1), key=lambda k: (sum(got[k]) - target[k], k))
+        got[donor].sort()
+        got[sid].append(got[donor].pop(0))
+    plan = {}
+    for sid, sizes in got.items():
+        breakdown = {}
+        for size in sizes:
+            breakdown[str(size)] = breakdown.get(str(size), 0) + 1
+        plan[sid] = {"breakdown": breakdown, "quantity": sum(sizes), "was": qty[sid]}
+    return {"supplies": plan, "units": sum(p["quantity"] for p in plan.values()), "skipped": skipped, "mixed": True}
+
+
+def _single_size_plan(qty, inv, target, skipped):
     sizes = sorted(inv, key=lambda s: inv[s] * s, reverse=True)
     free, groups = dict(target), {}
     for size in sizes[1:]:
@@ -166,8 +202,7 @@ def box_plan(supplies, inventory=None, box_size=None):
         if members:
             for sid, n in zip(members, _apportion([target[s] / size for s in members], inv[size])):
                 plan[sid] = {"breakdown": {str(size): n}, "quantity": size * n, "was": qty[sid]}
-    return {"supplies": plan, "units": sum(p["quantity"] for p in plan.values()),
-            "skipped": [str(s["supply_id"]) for s in supplies if int(s["quantity"]) <= 1]}
+    return {"supplies": plan, "units": sum(p["quantity"] for p in plan.values()), "skipped": skipped, "mixed": False}
 
 
 # --- Правка мест по ответу supplies_orders_get ---
@@ -230,7 +265,10 @@ def remove(data):
                        "items_body": None if data.get("keep_quantity") else _items_body(supply, new_comp),
                        "quantity": {"before": comp, "after": new_comp, "removed": removed},
                        "removed_cargo_ids": sorted(str(c["cargo_id"]) for c in mine if str(c["cargo_id"]) in ids)})
-    return {"supplies": result, "warnings": _expiry_warning(data)}
+    return {"supplies": result, "warnings": _expiry_warning(data),
+            "order": "сначала места (cargoes_body), после их succeeded — перечитать заявку и состав (items_body, "
+                     "expected.bundle_id из свежего чтения): мест меньше состава Seller AI принимает, а поднять состав "
+                     "у поставки с местами Ozon не даёт"}
 
 
 def add(data):
@@ -291,7 +329,8 @@ def main():
     data = json.loads(sys.stdin.read() if a.input == "-" else open(a.input, encoding="utf-8").read())
     try:
         if a.command == "boxplan":
-            r = box_plan(data["supplies"], data.get("inventory"), data.get("box_size"))
+            r = box_plan(data["supplies"], data.get("inventory"), data.get("box_size"), bool(data.get("allow_mixed")),
+                         data.get("expires"))
         else:
             r = {"layout": layout, "remove": remove, "add": add, "check": check}[a.command](data)
     except (CargoError, KeyError) as e:

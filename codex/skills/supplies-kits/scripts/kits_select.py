@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Точный объём из целых поставок готовых Super-заявок — чистый подбор над ответами `supplies_orders_get`.
 
-    python3 kits_select.py rows   in.json   # {"sku", "orders": [ответы supplies_orders_get], "now": "…Z"} → кандидаты
-    python3 kits_select.py select in.json   # {"rows": [...], "target": 6000, "allow_repeats": true,
-                                            #  "exclude_supply_ids": [...], "node_limit": 300000} → выбор
+    python3 kits_select.py rows    in.json  # {"sku", "orders": [ответы supplies_orders_get], "now": "…Z"} → кандидаты
+    python3 kits_select.py select  in.json  # {"rows": [...], "target": 6000 | "targets": [6000, 3000],
+                                            #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
+    python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
+                                            #  "exclude_supply_ids": [...]} → по поставке на нуждающийся кластер
 
 Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора: точная сумма →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
-заявок → меньше поставок. «Начатая» заявка — та, часть поставок которой уже отгружена, а часть ещё ждёт.
+заявок → меньше поставок. «Начатая» заявка — та, часть поставок которой уже отгружена или уже взята в комплекты
+(`exclude_supply_ids`), а часть ещё ждёт. Несколько объёмов (`targets`) — непересекающиеся комплекты: поставки
+первого не входят во второй, а их заявки для второго — начатые.
 """
 import argparse
+import itertools
 import json
 import sys
 from datetime import datetime
@@ -72,11 +77,18 @@ def rows_from_orders(order_pages, sku, now=None):
     return {"rows": rows, "rejected": rejected}
 
 
+def _free_rows(rows, exclude):
+    """Свободные поставки; заявка, часть поставок которой уже взята в комплекты (exclude), — начатая."""
+    excl = {str(x) for x in exclude}
+    taken_orders = {str(r["order_id"]) for r in rows if str(r["supply_id"]) in excl}
+    return [dict(r, started=bool(r.get("started")) or str(r["order_id"]) in taken_orders)
+            for r in rows if str(r["supply_id"]) not in excl and int(r["quantity"]) > 0]
+
+
 def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
     if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
         raise KitError("Нужно целое количество больше нуля")
-    excl = {str(x) for x in exclude}
-    rows = [r for r in rows if str(r["supply_id"]) not in excl and int(r["quantity"]) > 0]
+    rows = _free_rows(rows, exclude)
     if not rows:
         raise KitError("Нет свободных подходящих поставок")
     rows.sort(key=lambda r: (not r.get("started"), str(r["order_id"]), -int(r["quantity"]), str(r["supply_id"])))
@@ -148,15 +160,69 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
             "started_leftovers_not_taken": leftovers}
 
 
+def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000):
+    """Несколько комплектов из непересекающихся поставок: по порядку пользователя, а если так не выходит —
+    в другом порядке (первый удачный); поставки взятых комплектов исключаются из следующих."""
+    if not targets or len(targets) > 6:
+        raise KitError("Нужно от 1 до 6 объёмов")
+    order, last = list(range(len(targets))), None
+    for perm in itertools.permutations(order):
+        taken, kits = list(exclude), {}
+        try:
+            for i in perm:
+                kits[i] = select(rows, targets[i], allow_repeats, taken, node_limit)
+                taken += [r["supply_id"] for r in kits[i]["supplies"]]
+        except KitError as e:
+            last = e
+            continue
+        return {"targets": list(targets), "order_used": [targets[i] for i in perm],
+                "kits": [kits[i] for i in order], "proven": all(k["proven"] for k in kits.values())}
+    raise KitError(f"Непересекающихся комплектов на {targets} нет ни в каком порядке: {last}")
+
+
+def by_need(rows, need, exclude=()):
+    """На каждый нуждающийся кластер — одна целая поставка: наименьшая не меньше потребности, иначе наибольшая
+    (наименьший недобор); перебор — в днях запаса по ADS. Кластеры без поставок — остаток новой заявкой."""
+    free = _free_rows(rows, exclude)
+    used, out, missing = set(), [], []
+    for n in need:
+        cid = str(n.get("cluster_id") or n.get("id") or "")
+        raw = n.get("need", n.get("quantity", n.get("recommended_supply")))
+        want = int(raw or 0)
+        if not cid or want <= 0:
+            continue
+        cand = [r for r in free if str(r["cluster_id"]) == cid and str(r["supply_id"]) not in used]
+        if not cand:
+            missing.append({"cluster_id": cid, "name": n.get("name"), "need": want})
+            continue
+        enough = [r for r in cand if int(r["quantity"]) >= want]
+        pick = (min(enough, key=lambda r: (int(r["quantity"]), not r.get("started"), str(r["supply_id"]))) if enough
+                else max(cand, key=lambda r: (int(r["quantity"]), r.get("started"), str(r["supply_id"]))))
+        used.add(str(pick["supply_id"]))
+        qty, ads = int(pick["quantity"]), float(n.get("ads") or 0)
+        out.append({"cluster_id": cid, "name": n.get("name") or pick.get("cluster"), "need": want, "supply": pick,
+                    "quantity": qty, "over": max(0, qty - want), "short": max(0, want - qty),
+                    "over_days": round((qty - want) / ads, 1) if ads > 0 and qty > want else None})
+    return {"clusters": out, "missing": missing, "taken_units": sum(c["quantity"] for c in out),
+            "need_units": sum(c["need"] for c in out) + sum(m["need"] for m in missing),
+            "left_for_new_order": sum(c["short"] for c in out) + sum(m["need"] for m in missing),
+            "orders": sorted({c["supply"]["order_id"] for c in out})}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["rows", "select"])
+    ap.add_argument("command", choices=["rows", "select", "by_need"])
     ap.add_argument("input")
     a = ap.parse_args()
     d = json.loads(sys.stdin.read() if a.input == "-" else open(a.input, encoding="utf-8").read())
     try:
         if a.command == "rows":
             r = rows_from_orders(d["orders"], d["sku"], d.get("now"))
+        elif a.command == "by_need":
+            r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or ())
+        elif d.get("targets"):
+            r = select_many(d["rows"], d["targets"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
+                            int(d.get("node_limit", 300000)))
         else:
             r = select(d["rows"], d["target"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
                        int(d.get("node_limit", 300000)))

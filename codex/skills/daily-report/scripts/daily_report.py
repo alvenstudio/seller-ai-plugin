@@ -4,14 +4,20 @@
 Скрипт ничего не запрашивает: агент сохраняет ответы инструментов в файлы и передаёт их сюда.
 
     python3 daily_report.py --products products.json --plan plan.json \
-        [--cpc cpc.json] [--previous products_earlier.json] [--strategy strategy.json] \
-        [--store-id ID] [--store-name NAME] [--json]
+        [--cpc cpc.json] [--campaign-products c1.json c2.json …] [--cpo cpo.json] \
+        [--previous products_earlier.json] [--strategy strategy.json] [--store-id ID] [--store-name NAME] [--json]
 
 --products  ответ promotion_analytics_get со slice=product (все типы продвижения) за день или период;
 --cpc       тот же запрос с types=cpc_search_reco,cpc_search,special — чтобы разделить расход на CPC и CPO;
 --plan      ответ unit_economics_plan_list (целевой ДРР товара — inputs.drr, доля);
+--campaign-products  ответы promotion_campaign_products_list активных кампаний за клики (по файлу на кампанию):
+            текущая ставка товара в каждой («CPC тек.», у автостратегии — «авто») и цель биддера (`bidder`);
+--cpo       ответ promotion_cpo_products_list: ставка «Оплаты за заказ» товара в % и ₽;
 --previous  более ранний ответ --products за тот же период (промежуточный срез);
 --strategy  references/store-promotion-strategies.json (пороги и коридор цели).
+
+Цель товара: в кампании биддера («Целевой общий расход») — его цель в силе (`bidder.target_total_drr`: своя, из плана
+или разгона), иначе ДРР плана юнит-экономики.
 
 Печатает Markdown (или JSON с --json): аномалии, итог, таблица по товарам, ДРР к цели, наблюдения, срез.
 """
@@ -34,6 +40,8 @@ HIGH_DRR_MARK = 40.0        # %: пометка ⚠️ в таблице
 DELTA_DRR_MARK = 25.0       # %: пометка ⚠️ в срезе
 
 DEFAULT_STRATEGY = {"target_band": {"below": -2.0, "above": 1.0}, "min_spend_for_action_rub": 300}
+# Стратегии со ставками товаров (у остальных — автостратегии Ozon: ставки он ставит сам, `bid` = 0).
+BID_STRATEGIES = {"TARGET_BIDS", "TARGET_TOTAL_DRR"}
 
 
 def load(path):
@@ -87,8 +95,53 @@ def targets_from_plan(plan):
     return out
 
 
-def build_rows(products, cpc, targets):
+def bids_from_campaigns(answers):
+    """SKU → ставки по кампаниям и цель биддера из ответов promotion_campaign_products_list."""
+    out = {}
+    for a in answers or []:
+        strategy = (a.get("strategy") or "").upper() or None
+        for item in a.get("items") or []:
+            sku = str(item.get("sku"))
+            e = out.setdefault(sku, {"campaigns": [], "bidder": None, "bidder_spend": None})
+            bidder = item.get("bidder")
+            auto = strategy is not None and strategy not in BID_STRATEGIES and not bidder
+            e["campaigns"].append({"campaign_id": a.get("campaign_id"), "strategy": strategy, "auto": auto,
+                                   "bid": None if auto else num(item.get("bid")), "bidder": bool(bidder)})
+            spend = num((item.get("stats") or {}).get("expense")) or 0.0
+            if bidder and bidder.get("target_total_drr") is not None and (e["bidder_spend"] is None
+                                                                           or spend > e["bidder_spend"]):
+                e["bidder"] = {"target": num(bidder["target_total_drr"]), "source": bidder.get("target_source")}
+                e["bidder_spend"] = spend
+    return out
+
+
+def cpo_bids(answer):
+    """SKU → ставка «Оплаты за заказ»: включена ли, % и ₽ (как в кабинете: display_bid_pct / display_bid_rub)."""
+    out = {}
+    for item in (answer or {}).get("items") or []:
+        out[str(item.get("sku"))] = {"enabled": item.get("enabled"), "pct": num(item.get("display_bid_pct")),
+                                     "rub": num(item.get("display_bid_rub")), "reduced": bool(item.get("reduced"))}
+    return out
+
+
+def bid_text(bids):
+    """«CPC тек.» по кампаниям: «12 ₽ / авто»; биддер — «12 ₽ (б)»."""
+    if not bids:
+        return "—"
+    parts = []
+    for c in bids["campaigns"]:
+        if c["auto"]:
+            parts.append("авто")
+        elif c["bid"] is None:
+            parts.append("—")
+        else:
+            parts.append(f"{c['bid']:,.0f} ₽".replace(",", " ") + (" (б)" if c["bidder"] else ""))
+    return " / ".join(parts)
+
+
+def build_rows(products, cpc, targets, bids=None, cpo=None):
     cpc_rows = product_rows(cpc) if cpc else {}
+    bids, cpo = bids or {}, cpo or {}
     out = []
     for sku, row in product_rows(products).items():
         m = row.get("metrics") or {}
@@ -97,6 +150,10 @@ def build_rows(products, cpc, targets):
         cpc_spend = num(c.get("expense")) if cpc else None
         clicks = num(m.get("clicks"))
         orders = num(m.get("orders"))
+        b = bids.get(sku)
+        bidder = (b or {}).get("bidder")
+        target, source = (bidder["target"], f"bidder:{bidder['source']}") if bidder else (targets.get(sku), "plan")
+        c_bid = cpo.get(sku)
         out.append({
             "sku": sku,
             "name": row.get("name") or "",
@@ -110,8 +167,12 @@ def build_rows(products, cpc, targets):
             "conversion": (orders / clicks * 100) if clicks and orders is not None else None,
             "drr": num(m.get("drr_promo")),
             "drr_total": num(m.get("drr")),
-            "target": targets.get(sku),
+            "target": target,
+            "target_source": source if target is not None else None,
             "avg_cpc": num(c.get("click_cost")) if cpc else None,
+            "bids": b["campaigns"] if b else None,
+            "cpc_now": bid_text(b) if b else None,
+            "cpo": c_bid,
         })
     out.sort(key=lambda r: -r["spend"])
     return out
@@ -251,14 +312,15 @@ def observations(rows, totals):
     return out
 
 
-def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None):
+def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None, campaign_products=None, cpo=None):
     strategy_all = strategy or {}
     merged = dict(DEFAULT_STRATEGY)
     merged.update(strategy_all.get("default_strategy") or {})
     merged.update((strategy_all.get("stores") or {}).get(str(store_id), {}) if store_id else {})
     band = merged.get("target_band") or DEFAULT_STRATEGY["target_band"]
     targets = targets_from_plan(plan)
-    rows = build_rows(products, cpc, targets)
+    bids = bids_from_campaigns(campaign_products)
+    rows = build_rows(products, cpc, targets, bids, cpo_bids(cpo))
     totals = totals_of(products)
     period = products.get("period") or {}
     single_day = period.get("from") == period.get("to")
@@ -267,13 +329,14 @@ def build(products, plan, cpc=None, previous=None, strategy=None, store_id=None)
         errors.append("ОТПРАВЛЕНИЯ ПЕРИОДА ЕЩЁ НЕ ЗАГРУЖЕНЫ — ОБЩИЙ ДРР НЕИЗВЕСТЕН")
     if (products.get("models") or {}).get("unknown_days"):
         errors.append("ЗАКАЗЫ МОДЕЛЕЙ НЕИЗВЕСТНЫ ЗА " + ", ".join(products["models"]["unknown_days"]))
-    prev_rows = build_rows(previous, None, targets) if previous else None
+    prev_rows = build_rows(previous, None, targets, bids) if previous else None
     anomalies = detect_anomalies(rows, totals, single_day, prev_rows, errors)
     for r in rows:
         r["signal"] = signal(r, band) if single_day else None
     return {
         "period": period, "store_id": store_id, "totals": totals, "rows": rows, "anomalies": anomalies,
-        "observations": observations(rows, totals), "band": band,
+        "observations": observations(rows, totals), "band": band, "bids_known": campaign_products is not None,
+        "cpo_known": cpo is not None,
         "deltas": deltas(rows, prev_rows) if prev_rows else None,
     }
 
@@ -298,19 +361,36 @@ def render(report, store_name=""):
               f"| ДРР в продвижении | {pct(t['drr'])} |",
               f"| ДРР общий | {pct(t['drr_total'])} |",
               f"| CTR | {pct(t['ctr'], 2)} |", "",
-              "## По товарам", "",
-              "| Товар | Расход CPC | Расход CPO | Расход ∑ | Прод. рекл. | Прод. итого | CTR | Конв. | ДРР | ДРР общ. "
-              "| Цел. ДРР | CPC ср. |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "## По товарам", ""]
+    extra = (["CPC тек."] if report.get("bids_known") else []) + (["CPO %", "CPO ₽"] if report.get("cpo_known") else [])
+    head = ["Товар", "Расход CPC", "Расход CPO", "Расход ∑", "Прод. рекл.", "Прод. итого", "CTR", "Конв.", "ДРР",
+            "ДРР общ.", "Цел. ДРР", "CPC ср."] + extra
+    lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in report["rows"]:
         mark = " ⚠️" if (r["drr_total"] or 0) > HIGH_DRR_MARK else ""
-        lines.append(
-            f"| {r['name'][:50]} ({r['sku']}) | {money(r['cpc_spend'])} | {money(r['cpo_spend'])} | {money(r['spend'])} | "
-            f"{money(r['ad_revenue'])} | {money(r['revenue'])} | {pct(r['ctr'], 2) if r['ctr'] else '—'} | "
-            f"{pct(r['conversion']) if r['conversion'] else '—'} | {pct(r['drr']) if r['drr'] else '—'} | "
-            f"{pct(r['drr_total'])}{mark} | {pct(r['target'])} | {money(r['avg_cpc']) if r['avg_cpc'] else '—'} |")
-    lines.append(f"| **ИТОГО** | | | **{money(t['spend'])}** | **{money(t['ad_revenue'])}** | **{money(t['revenue'])}** | "
-                 f"**{pct(t['ctr'], 2)}** | | **{pct(t['drr'])}** | **{pct(t['drr_total'])}** | | |")
+        star = "*" if (r.get("target_source") or "").startswith("bidder") else ""
+        cells = [f"{r['name'][:50]} ({r['sku']})", money(r['cpc_spend']), money(r['cpo_spend']), money(r['spend']),
+                 money(r['ad_revenue']), money(r['revenue']), pct(r['ctr'], 2) if r['ctr'] else '—',
+                 pct(r['conversion']) if r['conversion'] else '—', pct(r['drr']) if r['drr'] else '—',
+                 f"{pct(r['drr_total'])}{mark}", f"{pct(r['target'])}{star}",
+                 money(r['avg_cpc']) if r['avg_cpc'] else '—']
+        if report.get("bids_known"):
+            cells.append(r.get("cpc_now") or "—")
+        if report.get("cpo_known"):
+            c = r.get("cpo")
+            if not c:
+                cells += ["—", "—"]
+            elif c["enabled"] is False:
+                cells += ["выкл.", "—"]
+            else:
+                cells += [pct(c["pct"]), money(c["rub"])]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines.append("| " + " | ".join(["**ИТОГО**", "", "", f"**{money(t['spend'])}**", f"**{money(t['ad_revenue'])}**",
+                                    f"**{money(t['revenue'])}**", f"**{pct(t['ctr'], 2)}**", "", f"**{pct(t['drr'])}**",
+                                    f"**{pct(t['drr_total'])}**", "", ""] + [""] * len(extra)) + " |")
+    if any((r.get("target_source") or "").startswith("bidder") for r in report["rows"]):
+        lines += ["", "\\* цель биддера («Целевой общий расход»: своя, из плана или разгон) — сигналы и перерасход "
+                      "считаются к ней. «(б)» — ставку ставит биддер."]
     groups = {"above": [], "ok": [], "below": []}
     for r in report["rows"]:
         if r.get("signal"):
@@ -347,14 +427,17 @@ def main(argv=None):
     ap.add_argument("--products", required=True)
     ap.add_argument("--plan")
     ap.add_argument("--cpc")
+    ap.add_argument("--campaign-products", nargs="*", help="ответы promotion_campaign_products_list")
+    ap.add_argument("--cpo", help="ответ promotion_cpo_products_list")
     ap.add_argument("--previous")
     ap.add_argument("--strategy")
     ap.add_argument("--store-id")
     ap.add_argument("--store-name", default="")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    campaigns = [load(f) for f in args.campaign_products] if args.campaign_products is not None else None
     report = build(load(args.products), load(args.plan), load(args.cpc), load(args.previous), load(args.strategy),
-                   args.store_id)
+                   args.store_id, campaigns, load(args.cpo))
     if args.json:
         json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")

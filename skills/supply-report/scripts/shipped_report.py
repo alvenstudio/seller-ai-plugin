@@ -4,10 +4,13 @@
 
     python3 shipped_report.py in.json > report.md
     вход: {"items": [строки supplies_items_list], "orders": [ответы supplies_orders_get] (необязательно),
-           "period": {"from": "2026-01-01", "to": "2026-03-18"}, "group": ["product", "month", "state", "order"]}
+           "period": {"from": "2026-01-01", "to": "2026-03-18"}, "date_basis": "timeslot" | "created",
+           "group": ["product", "month", "state", "order", "cluster", "warehouse", "date_state"]}
 
 Отгруженным считается товар поставок в статусах от «на точке отгрузки» и дальше; DATA_FILLING, READY_TO_SUPPLY,
-CANCELLED, OVERDUE, REJECTED_AT_SUPPLY_WAREHOUSE не считаются. Месяц и день — по началу таймслота, время Москвы.
+CANCELLED, OVERDUE, REJECTED_AT_SUPPLY_WAREHOUSE не считаются. Месяц и день — по началу таймслота (`date_basis:
+timeslot`, по умолчанию) или по дате создания заявки (`created`), время Москвы. `cluster` — кластер поставки,
+`warehouse` — склад хранения, `date_state` — сводная «дата × статус».
 """
 import argparse
 import json
@@ -22,20 +25,20 @@ STATE_RU = {"ACCEPTED_AT_SUPPLY_WAREHOUSE": "на точке отгрузки", 
 MSK = timezone(timedelta(hours=3))
 
 
-def _day(row):
-    ts = row.get("timeslot_from")
+def _day(row, basis="timeslot"):
+    ts = row.get("created_at" if basis == "created" else "timeslot_from")
     if not ts:
         return None
     return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(MSK).date()
 
 
-def shipped_rows(items, period=None):
+def shipped_rows(items, period=None, basis="timeslot"):
     out = []
     for r in items:
         state = r.get("supply_state") or r.get("order_state")
         if state not in SHIPPED:
             continue
-        d = _day(r)
+        d = _day(r, basis)
         if period and d is not None:
             if period.get("from") and d.isoformat() < period["from"]:
                 continue
@@ -80,15 +83,29 @@ def packaging(rows, orders):
     return agg
 
 
+def _by(rows, key):
+    agg = {}
+    for r in rows:
+        k = r.get(key) or "не известно"
+        a = agg.setdefault(k, {"q": 0, "supplies": set()})
+        a["q"] += int(r["quantity"])
+        a["supplies"].add(r["supply_id"])
+    return sorted(agg.items(), key=lambda kv: -kv[1]["q"])
+
+
 def report(data):
-    rows = shipped_rows(data.get("items") or [], data.get("period"))
+    basis = data.get("date_basis") or "timeslot"
+    if basis not in ("timeslot", "created"):
+        raise ValueError("date_basis: timeslot или created")
+    rows = shipped_rows(data.get("items") or [], data.get("period"), basis)
     groups = data.get("group") or ["product", "month", "state"]
     total = sum(int(r["quantity"]) for r in rows)
+    what = "дата отгрузки" if basis == "timeslot" else "дата создания заявки"
     out = [f"**Отгружено: {_fmt(total)} шт** — {len({r['supply_id'] for r in rows})} поставок, "
-           f"{len({r['order_id'] for r in rows})} заявок."]
+           f"{len({r['order_id'] for r in rows})} заявок. Даты — {what}, время Москвы."]
     no_slot = [r for r in rows if r["_day"] is None]
     if no_slot:
-        out.append(f"Без даты таймслота: {_fmt(sum(int(r['quantity']) for r in no_slot))} шт — в период не отфильтрованы.")
+        out.append(f"Без даты ({what}): {_fmt(sum(int(r['quantity']) for r in no_slot))} шт — в период не отфильтрованы.")
     if "product" in groups:
         agg = {}
         for r in rows:
@@ -104,12 +121,27 @@ def report(data):
         for r in rows:
             k = r["_day"].strftime("%Y-%m") if r["_day"] else "без даты"
             agg[k] = agg.get(k, 0) + int(r["quantity"])
-        out += ["", "### По месяцам (дата отгрузки)", _table(["Месяц", "Штук"], [[k, _fmt(v)] for k, v in sorted(agg.items())])]
+        out += ["", f"### По месяцам ({what})", _table(["Месяц", "Штук"], [[k, _fmt(v)] for k, v in sorted(agg.items())])]
     if "state" in groups:
         agg = {}
         for r in rows:
             agg[r["_state"]] = agg.get(r["_state"], 0) + int(r["quantity"])
         out += ["", "### По статусам", _table(["Статус", "Штук"], [[STATE_RU[s], _fmt(agg[s])] for s in SHIPPED if s in agg])]
+    if "cluster" in groups:
+        out += ["", "### По кластерам", _table(["Кластер", "Штук", "Поставок"],
+                [[k, _fmt(a["q"]), len(a["supplies"])] for k, a in _by(rows, "cluster_name")])]
+    if "warehouse" in groups:
+        out += ["", "### По складам хранения", _table(["Склад", "Штук", "Поставок"],
+                [[k, _fmt(a["q"]), len(a["supplies"])] for k, a in _by(rows, "storage_warehouse_name")])]
+    if "date_state" in groups:
+        states = [st for st in SHIPPED if any(r["_state"] == st for r in rows)]
+        agg = {}
+        for r in rows:
+            k = r["_day"].isoformat() if r["_day"] else "без даты"
+            agg.setdefault(k, {})[r["_state"]] = agg.get(k, {}).get(r["_state"], 0) + int(r["quantity"])
+        out += ["", f"### {what.capitalize()} × статус", _table(["Дата"] + [STATE_RU[st] for st in states] + ["Всего"],
+                [[k] + [_fmt(v.get(st, 0)) if v.get(st) else "—" for st in states] + [_fmt(sum(v.values()))]
+                 for k, v in sorted(agg.items())])]
     if "order" in groups:
         agg = {}
         for r in rows:

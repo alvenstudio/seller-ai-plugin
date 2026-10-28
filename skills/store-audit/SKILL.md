@@ -14,9 +14,11 @@ description: "Финансовый аудит магазина Ozon за про�
 - **Себестоимость и налог.** Это единственные данные, которых нет в Ozon. Проверить в Seller AI:
   - `cost_prices_list` — у каких товаров нет себестоимости (`current: null`) или она «из Ozon» (`source: ozon_net_price`); попросить
     недостающее (таблицей или картинкой — расшифровать) и записать периоды `cost_prices_save_many` (`changes[{product_id,
-    effective_from, cost}]`) после показа «было → станет» и «да»;
+    effective_from, cost}]`): присланная таблица с датами — согласие, «было → стало» — в ответ; расшифровка картинки
+    неуверенная или дат нет — показать и спросить один раз;
   - `stores_economics_settings_list` — ставка, база и НДС по датам. Нет ставки — спросить и записать версию
-    `stores_economics_settings_save` (с согласием). У продавца может быть УСН + НДС + прочие удержания — эффективная ставка.
+    `stores_economics_settings_save` (названная ставка с датой — согласие). У продавца может быть УСН + НДС + прочие
+    удержания — эффективная ставка.
 - **Строки вне Ozon** — деньги, которые владелец знает сам: налоги второго магазина того же ИП, выкупы маркетплейсом, ожидающие
   подписания, и т. п. — в `extra` конфига.
 
@@ -33,14 +35,17 @@ description: "Финансовый аудит магазина Ozon за про�
 | `accruals-<окно>.json` | `unit_economics_accruals_list`: те же окна, `scheme=all`, `allocate=none` |
 | `assets.json` | `assets_summary_get` (остатки и активы сейчас) |
 | `batches.json` | `cost_batches_list` без `sku` (сверка остатка FBO с журналом партий) |
-| `config.json` | составить: `{"store_id", "store_name", "extra": [{"label", "amount", "note"}], "non_pickup_count"}` |
+| `np-<страница>.json` | `finance_accruals_list`: `from`, `to` периода, `type_ids=6,40,59`, все страницы |
+| `config.json` | составить: `{"store_id", "store_name", "extra": [{"label", "amount", "note"}]}` |
 
-`non_pickup_count` — число невыкупов и возвратов за период: `finance_accruals_list` с `type_id=59` («Обратная логистика»), `total`
-ответа (по строке на единицу; без него слайд покажет только сумму).
+Невыкупы и возвраты — строки услуг 6, 40, 59 (отмена, обработка возврата в ПВЗ, обратная логистика): скрипт считает
+уникальные отправления (`unit_number`) и сумму этих услуг (`--non-pickups`). Без этих страниц — `non_pickup_count` конфига
+(`total` ответа с `type_id=59`): это строки обратной логистики, а не отправления, — слайд так и подпишет.
 
 ```sh
 python3 scripts/build_report.py --profit audit/profit-*.json --accruals audit/accruals-*.json \
-    --assets audit/assets.json --batches audit/batches.json --config audit/config.json --out audit/report.json
+    --assets audit/assets.json --batches audit/batches.json --non-pickups audit/np-*.json \
+    --config audit/config.json --out audit/report.json
 python3 scripts/render.py --report audit/report.json --out audit-out
 ```
 

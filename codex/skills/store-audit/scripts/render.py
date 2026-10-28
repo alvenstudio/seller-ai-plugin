@@ -355,7 +355,7 @@ def build_slides(rep):
 <h2>Товар,<br>уехавший назад</h2>
 <div class="tiles">
   <div class="tile"><div class="v">{n(abs(npk.get("amount") or 0))}</div><div class="l">₽ обратной логистики и обработки невыкупов</div></div>
-  <div class="tile"><div class="v">{n(count)}</div><div class="l">невыкупов и возвратов</div></div>
+  <div class="tile"><div class="v">{n(count)}</div><div class="l">{"строк обратной логистики" if npk.get("basis") == "rows" else "невыкупов и возвратов (отправлений)"}</div></div>
   <div class="tile"><div class="v">{n(st.get("removal"))}</div><div class="l">единиц к вывозу и в пути к вам сейчас</div></div>
 </div>
 <p class="note">Невыкуп — покупатель не забрал заказ: выручки нет, а логистика списывается; {avg}
