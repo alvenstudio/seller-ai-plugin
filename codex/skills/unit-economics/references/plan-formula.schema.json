@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "name": "plan",
   "rates": "fraction",
   "money": "decimal",
@@ -42,7 +42,6 @@
     "insurance_rate": "stock insurance as a share of price (fraction)",
     "other_ozon_fees": "other Ozon fees per bought unit (packing, fines, reviews, installment …), ₽",
     "early_payout_rate": "Ozon's fee for daily, weekly and early payouts as a share of each payout to the seller's bank account (fraction)",
-    "points_share": "«Баллы за скидки» as a share of price, not taxed with the revenue base (fraction)",
     "tax_rate": "income tax rate (fraction): УСН 6 % / 15 % or an effective rate",
     "vat_rate": "VAT rate included in the income (fraction): 0, 0.05, 0.07, 0.1, 0.22",
     "tax_on_sales": "1 when the tax base is the whole sale (price), else 0",
@@ -101,6 +100,16 @@
         "args": [
           "commission_rate_manual",
           "commission_band_rate"
+        ]
+      }
+    },
+    {
+      "key": "points_share",
+      "expression": "commission_rate",
+      "ast": {
+        "op": "coalesce",
+        "args": [
+          "commission_rate"
         ]
       }
     },

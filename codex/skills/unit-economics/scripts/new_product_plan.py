@@ -3,7 +3,7 @@
 
 Для карточек магазина план считает Seller AI (unit_economics_plan_list / _preview). Этот скрипт нужен только для нового
 товара: он берёт тарифы логистики FBO из справочника Ozon (references/logistika-fbo-fbs.xlsx), фиксированные доли рынка
-кластеров и считает строку той же формулой v4, что Seller AI (references/plan-formula.schema.json), — ничего не запрашивая.
+кластеров и считает строку той же формулой v5, что Seller AI (references/plan-formula.schema.json), — ничего не запрашивая.
 
     python3 new_product_plan.py --inputs product.json [--plan plan.json] [--settings settings.json] \
         [--formula formula.json] [--clusters "Москва, МО и Дальние регионы" "Казань" | --ideal] [--json]
@@ -43,13 +43,12 @@ DEFAULTS = {
     "drr": 0.0, "other_unit_cost": 0.0, "commission_rate_manual": None, "last_mile": 25.0, "return_processing": 15.0,
     "buyout": 0.93, "cancel_before_ship": 0.0, "disposal_share": 0.0, "disposal_fee": 75.0, "supply_cost": 0.0,
     "placement": 0.0, "acquiring_rate": 0.01, "stars_rate": 0.0, "insurance_rate": 0.0, "other_ozon_fees": 0.0,
-    "early_payout_rate": 0.0, "points_share": 0.0, "tax_rate": None, "vat_rate": 0.0, "tax_on_sales": 0,
+    "early_payout_rate": 0.0, "tax_rate": None, "vat_rate": 0.0, "tax_on_sales": 0,
     "tax_on_profit": 0,
 }
 # Входы, которые разумно брать значением магазина (медиана строк его плана). Кросс-докинг — отдельно: на литр.
-STORE_PRIOR_INPUTS = ("buyout", "cancel_before_ship", "last_mile", "return_processing", "acquiring_rate", "points_share",
-                      "disposal_share", "disposal_fee", "stars_rate", "early_payout_rate", "insurance_rate",
-                      "other_ozon_fees")
+STORE_PRIOR_INPUTS = ("buyout", "cancel_before_ship", "last_mile", "return_processing", "acquiring_rate", "disposal_share",
+                      "disposal_fee", "stars_rate", "early_payout_rate", "insurance_rate", "other_ozon_fees")
 CROSS_DOCKING_PER_LITER = 15.0  # ₽ за литр, когда у магазина нет принятых поставок
 
 
@@ -159,7 +158,7 @@ def cluster_logistics(volume_liters, source_clusters, tariffs, shares, bucket):
     return {"volume_bucket": vol, "average": round(total, 2), "details": details}
 
 
-# ── формула плана v4 (AST из plan-formula.schema.json) ────────────────
+# ── формула плана v5 (AST из plan-formula.schema.json) ────────────────
 
 def evaluate(ast, env):
     """Правила AST контракта: null в арифметике — null, сравнение с null — false, if ленивый, деление на 0 — null."""
