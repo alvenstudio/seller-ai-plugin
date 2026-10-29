@@ -19,8 +19,10 @@ description: "Аналитика продаж магазина Ozon через S
 | Выкуплено и реализация по товарам | `unit_economics_accruals_list` (`from`, `to`, `scheme`) | `units {sold, returned, net}`, `sales {total, revenue, points, partners}` — по дате начисления (доставка), а не заказа |
 | Аналитика Ozon за любой период: заказано (сумма, штуки), показы в поиске и на карточке, корзины, сессии, конверсия в корзину, позиция, возвраты, отмены, доставлено — по дням, неделям, месяцам или за период, по товарам, по категориям или брендам или итогом магазина | `analytics_products_list` (`date_from`, `date_to` — закрытые дни, по умолчанию последние 7; `group` `period`/`day`/`week`/`month`; `slice` `product`/`store`/`category`/`brand`; `skus`, `offer_id`; `sort`, `order`; `limit` ≤ 500, `offset`) | товар: `revenue`, `ordered_units`, `hits_view`, `hits_view_search`, `hits_view_pdp`, `hits_tocart*`, `session_view`, `conv_tocart`, `position_category`, `returns`, `cancellations`, `delivered_units`, `series[]` по интервалам (`covered`); `slice=category`/`brand` — те же показатели в `groups[]` (`id`, `name`, у категории `path` — путь в дереве Ozon от корня, `skus` — товаров группы с данными); `totals` — магазин (выбранные товары); `coverage {complete, covered_from, covered_to, ranges, premium}`, `warnings` |
 | Заказано за 7 / 28 дней с динамикой к прошлому периоду, как в «Ценах» | `prices_products_list` (`period=7` или `28`, `status`, `search`, `sort=ordered_units`) | `sales {ordered_units, ordered_units_change_pct, views, views_change_pct, conversion_pct}`; `sales` списка — период и `orders_covered`, `covered_to` |
-| Цены товара | `prices_products_list`, `prices_products_get` | `prices {price, old_price, min_price, marketing_seller_price, net_price, vat}`, `price_index {color, …}`, `actions`, `stocks`, `expenses` |
+| Цены товара | `prices_products_list`, `prices_products_get` | `prices {price, old_price, min_price, marketing_seller_price, net_price, vat}`, `price_index {color; ozon.min_price — мин. цена на Ozon; external.min_price — на других площадках; self.min_price — ваша цена вне Ozon; competitor_min}`, `actions`, `stocks`, `expenses` |
 | Остатки FBO, ликвидность, дни до конца | `stocks_fbo_list` (`view=products` или `clusters`, `search`, `liquidity`, `stock`, `cluster_ids`, `sort`) | `available`, `unavailable`, `in_transit`, `removal`, `total`, `counters`; аналитика Ozon `liquidity`, `ads` (среднесуточные продажи за 28 дней), `idc` (дней до конца остатка), `days_without_sales`; `analytics: false` — эти поля `null` |
+| Остатки FBS (на моих складах) | `prices_products_get` (`product`); списком — `products_list` (`stock_where=fbs`, `sort=stock_fbs`) | `manager.stocks.fbs {present, reserved, available}`; в списке — `stocks.fbs` (в наличии); по каждому складу продавца — пока недоступно |
+| Кластеры и склады | `supplies_clusters_list` (`search`); склады продавца — `filters.warehouses` ответа `postings_fbs_list` | кластеры FBO и их склады; полного списка складов FBS с настройками пока нет |
 | Продажи по кластерам отгрузки и доставки | `supplies_planning_sales_by_clusters` (`period` или `date_from`/`date_to`, `scheme`, `skus`) | сводная таблица штук «кластер отгрузки × кластер доставки» |
 
 Карточки товаров (название, артикул, SKU по схемам, статус) — `products_list` / `products_get`.
@@ -44,9 +46,11 @@ description: "Аналитика продаж магазина Ozon через S
   ```bash
   python3 scripts/orders_summary.py in.json   # {"pages": [...], "group": ["sku"] | ["day"] | ["sku","day"], "exclude_statuses": []}
   ```
-  → штуки, сумма по цене продавца, средняя цена, выплата (где Ozon её отдал; штуки без выплаты названы), отправлений;
+  → штуки, сумма по цене продавца, средняя цена, выплата и средняя выплата (где Ozon её отдал; штуки без выплаты названы и в
+  среднюю не входят), отправлений;
   день — по Москве (FBO — создание, FBS — начало обработки). Отмены — в заказах, если их не исключить: назвать, что
-  посчитано. Родители разделённых FBS — `exclude_postings`.
+  посчитано. Родители разделённых FBS — `exclude_postings`: номера из `parent_posting_number` строк `postings_fbs_list` того же
+  периода (в `orders_list` этого поля нет).
 - **7 и 28 дней «Цен»** — закрытые дни по вчера, против стольких же дней до них; известны, только когда `orders_covered` (иначе
   «ещё загружается»). Показы — только у магазинов с Premium Plus/Pro.
 - **Аналитика за любой период** (`analytics_products_list`) — аналитика товаров Ozon по SKU и дню, которую хранит Seller AI:
@@ -83,5 +87,8 @@ description: "Аналитика продаж магазина Ozon через S
   `model_id` карточек из `products_list`.
 - Сессии и конверсия за период так, как их считает кабинет (уникальные посетители периода), сегодняшний день, аналитика поисковых
   запросов («Запросы моего товара», средняя позиция в поиске) — сказать, что это пока недоступно.
+- Сессии и конверсия в корзину отдельно из поиска и из карточки (`session_view_search`, `session_view_pdp`, `conv_tocart_search`,
+  `conv_tocart_pdp` Ozon) — Seller AI их не хранит. Не выводить их из показов и корзин: `hits_tocart_search ÷ hits_view_search` —
+  не конверсия Ozon.
 
 Нужное пользователю — запросом функции, сам, без его просьбы (навык `feedback`).

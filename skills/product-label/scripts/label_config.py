@@ -65,16 +65,35 @@ def find_entities(data: dict, query: str) -> list[dict]:
     return [e for e in data["legal_entities"] if q and q in (e.get("legal_entity") or "").lower()]
 
 
-def entity_for(data: dict, store_id: str, packer: str | None = None) -> tuple[dict, str | None]:
-    """Юрлицо для этикетки → (реквизиты, предупреждение). packer — подстрока названия; иначе владелец магазина."""
+def seller_entity(answer: dict | None) -> dict:
+    """Ответ `stores_seller_info_get` → {"legal_entity", "inn"} владельца магазина; {} — Seller AI их не прочитал."""
+    answer = answer or {}
+    company = answer.get("company") or (answer.get("item") or {}).get("company") or {}
+    if not company.get("legal_name"):
+        return {}
+    return {"legal_entity": company["legal_name"], "inn": company.get("inn") or ""}
+
+
+def entity_for(data: dict, store_id: str, packer: str | None = None,
+               seller: dict | None = None) -> tuple[dict, str | None]:
+    """Юрлицо для этикетки → (реквизиты, предупреждение). packer — подстрока названия; иначе владелец магазина:
+    из labels-config.json (`stores.<store_id>.owner`), а без него — юрлицо и ИНН из Seller AI (`seller_entity()`)."""
     query = packer or (data["stores"].get(str(store_id)) or {}).get("owner")
     if not query:
+        if seller:
+            return ({**{k: "" for k in ENTITY_FIELDS}, **seller},
+                    f"владелец — из Seller AI: {seller['legal_entity']}, ИНН {seller['inn'] or '—'}; адреса и телефона "
+                    f"там нет — спросить и сохранить: label_config.py set-entity … --owner-of {store_id}")
         return {}, f"в labels-config.json нет владельца магазина {store_id} (stores.{store_id}.owner) — реквизиты пустые"
     hits = find_entities(data, query)
     if len(hits) != 1:
         names = [e.get("legal_entity") for e in hits]
         return {}, f"юрлицо «{query}»: найдено {len(hits)} {names} — уточните (реквизиты не выдумывать)"
-    return {k: hits[0].get(k) or "" for k in ENTITY_FIELDS}, None
+    entity = {k: hits[0].get(k) or "" for k in ENTITY_FIELDS}
+    if not packer and seller and seller.get("inn") and entity["inn"] and entity["inn"] != seller["inn"]:
+        return entity, (f"ИНН владельца в labels-config.json {entity['inn']}, а у продавца в Ozon {seller['inn']} "
+                        f"({seller['legal_entity']}) — уточнить, чьи реквизиты ставить")
+    return entity, None
 
 
 def set_product(data: dict, store_id: str, sku: str, **fields) -> dict:

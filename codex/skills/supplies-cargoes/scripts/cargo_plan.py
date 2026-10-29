@@ -11,7 +11,7 @@
                                              #   с allow_mixed — и смешанно, если по одному размеру не выходит)
     python3 cargo_plan.py remove   in.json   # убрать места по cargo_id → удаление этих мест, затем новое количество
     python3 cargo_plan.py add      in.json   # добавить места к поставке → новое количество, затем новые места
-    python3 cargo_plan.py check    in.json   # сверка мест с составом поставок заявки
+    python3 cargo_plan.py check    in.json   # сверка мест с составом, правила приёмки, план против факта
 
 Входы (JSON-файл или - для stdin):
   layout:  {"sku": "…", "quantity": 960, "box_size": 20, "pallet_size": 600 | null,
@@ -25,7 +25,10 @@
             "replace": false, "expires": …}   # replace: true — прежний путь, новый полный набор (нужен срок)
   add:     {"order": <ответ supplies_orders_get>, "supply_id": "…", "sku": "…",
             "places": [{"type": "BOX", "quantity": 8}], "expires": …}   # срок — у новых мест
-  check:   {"order": <ответ supplies_orders_get>}
+  check:   {"order": <ответ supplies_orders_get>, "rules": <ответ supplies_cargo_rules_get> (необязательно),
+            "expected": {supply_id: штук по плану или факту после среза} (необязательно)}
+           правила: места заполнены и состав совпал с заявкой — всегда; прочие — только применимые и обязательные;
+           правил поставки нет в ответе — `rules_ok: null` (не «бесплатно»)
 """
 import argparse
 import json
@@ -312,8 +315,32 @@ def _expiry_warning(data):
             "без срока у оставшихся мест он пропадёт. Спросите срок у пользователя"]
 
 
+# Правила «Подготовки к приёмке», которые решают платность всегда (места заполнены, состав совпал с заявкой); прочие —
+# только применимые и обязательные, иначе верная поставка окажется «платной» из-за неприменимого правила.
+ALWAYS_RULES = ("cargoes_presents", "is_valid_distribution")
+
+
+def _rules(answer):
+    """{supply_id: невыполненные правила} из ответа supplies_cargo_rules_get; None — ответа нет."""
+    if answer is None:
+        return None
+    if not isinstance(answer, dict) or not isinstance(answer.get("supplies"), list):
+        raise CargoError("Это не ответ supplies_cargo_rules_get: правила не прочитаны — это не «бесплатно»")
+    out = {}
+    for s in answer["supplies"]:
+        rules = s.get("rules") or []
+        if not rules:
+            continue
+        out[str(s.get("supply_id"))] = sorted(
+            r["rule"] for r in rules if not r.get("satisfied")
+            and (r.get("rule") in ALWAYS_RULES or (r.get("applicable") and r.get("required"))))
+    return out
+
+
 def check(data):
     order, out = data["order"], []
+    rules = _rules(data.get("rules"))
+    expected = {str(k): int(v) for k, v in (data.get("expected") or {}).items()}
     for s in order.get("supplies") or []:
         if s.get("state") in ("CANCELLED", "OVERDUE", "REJECTED_AT_SUPPLY_WAREHOUSE"):
             continue
@@ -329,13 +356,25 @@ def check(data):
         sizes = sorted({sum(int(i.get("quantity") or 0) for i in c.get("items") or []) for c in mine if c.get("items")})
         diff = {k: in_cargo.get(k, 0) - comp.get(k, 0) for k in set(comp) | set(in_cargo)
                 if in_cargo.get(k, 0) != comp.get(k, 0)}
-        out.append({"supply_id": sid, "cluster": (s.get("cluster") or {}).get("name"), "composition": comp,
-                    "in_cargoes": in_cargo, "places": len(mine),
-                    "boxes": sum(1 for c in mine if c.get("type") == "BOX"),
-                    "pallets": sum(1 for c in mine if c.get("type") == "PALLET"),
-                    "units_per_place": sizes, "unknown_places": unknown,
-                    "ok": bool(mine) and not diff and not unknown, "diff": diff})
-    return {"supplies": out, "ok": all(r["ok"] for r in out)}
+        units = sum(comp.values())
+        row = {"supply_id": sid, "cluster": (s.get("cluster") or {}).get("name"), "composition": comp,
+               "in_cargoes": in_cargo, "places": len(mine),
+               "boxes": sum(1 for c in mine if c.get("type") == "BOX"),
+               "pallets": sum(1 for c in mine if c.get("type") == "PALLET"),
+               "units_per_place": sizes, "unknown_places": unknown, "single_unit": units == 1,
+               "ok": bool(mine) and not diff and not unknown, "diff": diff}
+        if rules is not None:
+            failed = rules.get(sid)
+            row["rules_failed"] = failed
+            row["rules_ok"] = None if failed is None else not failed
+            row["ok"] = row["ok"] and row["rules_ok"] is True
+        if sid in expected:
+            row["plan_diff"] = units - expected[sid]
+            row["ok"] = row["ok"] and row["plan_diff"] == 0
+        out.append(row)
+    return {"supplies": out, "ok": all(r["ok"] for r in out),
+            "units": sum(sum(r["composition"].values()) for r in out),
+            "single_unit_supplies": [r["supply_id"] for r in out if r["single_unit"]]}
 
 
 def main():

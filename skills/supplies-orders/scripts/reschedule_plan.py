@@ -7,15 +7,19 @@
            "timeslots": {order_id: ответ supplies_orders_timeslots_list}, "accuracy": ответ supplies_accuracy_get,
            "now": "2026-10-28T09:00:00Z", "horizon_days": 10, "threshold_percent": 10, "max_candidates": 30}
 
-Отбор — заявки с началом слота в прошлом и до now + horizon_days. Точность ниже порога или неизвестна — магазин
-пропускается целиком. Кандидаты заявки — слоты строго позже её текущего начала и позже now, по убыванию времени
-(сравниваются мгновения с поясом точки отгрузки, а не строки), не больше max_candidates. По каждой заявке — тело
+Отбор — заявки «Подготовки к отгрузке» (DATA_FILLING, READY_TO_SUPPLY; строки других статусов — в пропуски) с началом
+слота в прошлом и до now + horizon_days. Точность ниже порога или неизвестна — магазин пропускается целиком.
+Кандидаты заявки — слоты строго позже её текущего начала и позже now, по убыванию времени (сравниваются мгновения с
+поясом точки отгрузки, а не строки), не больше max_candidates. По каждой заявке — тело
 `supplies_orders_timeslot_set` для первого кандидата (`timeslot` — строки Ozon как есть, `expected` — текущий слот).
 """
 import argparse
 import json
 import sys
 from datetime import datetime, timedelta, timezone
+
+
+MOVABLE = {"DATA_FILLING", "READY_TO_SUPPLY"}
 
 
 class PlanError(ValueError):
@@ -91,6 +95,9 @@ def plan(data):
         def skip(reason):
             result["skipped"].append({"order_id": oid, "order_number": number, "reason": reason})
 
+        if r.get("state") and r["state"] not in MOVABLE:
+            skip(f"заявка {r['state']} — переносят только «Подготовку к отгрузке» (DATA_FILLING, READY_TO_SUPPLY)")
+            continue
         if (r.get("tags") or {}).get("virtual"):
             skip("виртуальная заявка — только в кабинете Ozon")
             continue

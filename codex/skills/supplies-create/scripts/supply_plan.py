@@ -6,7 +6,7 @@
 
     python3 supply_plan.py plan      plan_input.json      # распределение
     python3 supply_plan.py pending   pending_input.json   # что уже отгружено / подано по кластерам
-    python3 supply_plan.py intersect slots.json           # общие слоты нескольких черновиков (одна дата заявок)
+    python3 supply_plan.py intersect slots.json           # общие слоты нескольких черновиков или заявок (одна дата)
     python3 supply_plan.py plan -                          # вход из stdin
 
 Вход `plan`:
@@ -18,7 +18,9 @@
      "origin": {"latitude": 55.7, "longitude": 37.6}}   # необязательно: координаты точки отгрузки → дни в пути
     Дни в пути (travel_days кластера или оценка по origin: расстояние до склада кластера × 1,3 / 700 км в сутки, не
     меньше суток) уменьшают остаток к приезду поставки: остаток − ADS × дни в пути.
-Вход `intersect`: {"answers": [ответы supplies_drafts_timeslots_list разных черновиков одной точки]}
+Вход `intersect`: {"answers": [ответы supplies_drafts_timeslots_list черновиков (`days[].slots[]`) или
+    supplies_orders_timeslots_list заявок (`slots[]`) одной точки]}; выход — `common[]` со строками каждого ответа
+    (`per_answer`, прежнее имя `per_draft`)
 Вход `pending`:
     {"mode": "shipped|all", "items": [строки supplies_items_list]}
     кластер — из строки (`cluster_id`, `cluster_name`); `orders` (строки supplies_orders_list) — необязательно, для строк
@@ -380,29 +382,39 @@ def _instant(value, offset_s):
     return t.astimezone(timezone.utc)
 
 
+def _answer_slots(a):
+    """Слоты одного ответа: черновика (`days[].slots[]`) или заявки (`slots[]`); ключ — мгновения начала и конца."""
+    if not isinstance(a, dict):
+        raise PlanError("Это не ответ таймслотов — ошибка не равна пустому списку")
+    offset = (a.get("timezone") or {}).get("offset_s")
+    if isinstance(a.get("days"), list):
+        rows = [(x, day.get("date")) for day in a["days"] for x in day.get("slots") or []]
+    elif isinstance(a.get("slots"), list):
+        if a.get("forbidden"):
+            raise PlanError("Ozon не даёт менять таймслот заявки: " + ", ".join(map(str, a["forbidden"])))
+        rows = [(x, x.get("date")) for x in a["slots"]]
+    else:
+        raise PlanError("Это не ответ supplies_drafts_timeslots_list или supplies_orders_timeslots_list — "
+                        "ошибка не равна пустому списку")
+    return {(_instant(x["from"], offset), _instant(x["to"], offset)):
+            {"from": x["from"], "to": x["to"], "label": x.get("label"), "date": date} for x, date in rows}
+
+
 def intersect(data):
-    """Слоты, общие для всех черновиков (одна дата и время заявок одной поставки); сравниваются мгновения, а в команду
-    каждого черновика идут его собственные строки слота."""
+    """Слоты, общие для всех черновиков или заявок одной поставки (одна дата и время); сравниваются мгновения, а в
+    команду каждого черновика или заявки идут его собственные строки слота."""
     answers = data.get("answers") or []
     if len(answers) < 2:
-        raise PlanError("Нужно хотя бы два ответа supplies_drafts_timeslots_list")
-    per = []
-    for a in answers:
-        if not isinstance(a, dict) or not isinstance(a.get("days"), list):
-            raise PlanError("Это не ответ supplies_drafts_timeslots_list — ошибка не равна пустому списку")
-        offset = (a.get("timezone") or {}).get("offset_s")
-        slots = {}
-        for day in a["days"]:
-            for x in day.get("slots") or []:
-                slots[(_instant(x["from"], offset), _instant(x["to"], offset))] = {
-                    "from": x["from"], "to": x["to"], "label": x.get("label"), "date": day.get("date")}
-        per.append(slots)
+        raise PlanError("Нужно хотя бы два ответа таймслотов (черновиков или заявок)")
+    per = [_answer_slots(a) for a in answers]
     common = sorted(set(per[0]).intersection(*per[1:]))
-    out = [{"start_utc": k[0].isoformat().replace("+00:00", "Z"), "label": per[0][k]["label"],
-            "date": per[0][k]["date"], "per_draft": [{"from": p[k]["from"], "to": p[k]["to"]} for p in per]}
-           for k in common]
-    return {"drafts": len(answers), "common": out, "dates": sorted({c["date"] for c in out if c["date"]}),
-            "no_common_slot": not out}
+    out = []
+    for k in common:
+        rows = [{"from": p[k]["from"], "to": p[k]["to"]} for p in per]
+        out.append({"start_utc": k[0].isoformat().replace("+00:00", "Z"), "label": per[0][k]["label"],
+                    "date": per[0][k]["date"], "per_answer": rows, "per_draft": rows})
+    return {"answers": len(answers), "drafts": len(answers), "common": out,
+            "dates": sorted({c["date"] for c in out if c["date"]}), "no_common_slot": not out}
 
 
 def main():

@@ -6,7 +6,8 @@
                                              #  или {"plans": [{"name", "answers"}], …} — общий календарь заявок серии
     python3 super_plan.py check     in.json  # {"calculation": draft.calculation, "plan": {cluster_id: {sku: штук}},
                                              #  "require_super": true} → принято ли ровно запланированное
-    python3 super_plan.py order     in.json  # {"order": ответ supplies_orders_get, "plan": …, "dropoff_id"} → сверка заявки
+    python3 super_plan.py order     in.json  # {"order": ответ supplies_orders_get, "plan": …, "dropoff_id",
+                                             #  "series_order_ids": [заявки серии, уже созданные]} → сверка заявки
 """
 import argparse
 import json
@@ -168,10 +169,12 @@ def check_calculation(calc, plan, require_super=False):
             "usable_until": calc.get("usable_until")}
 
 
-def check_order(order_page, plan, dropoff_id=None):
-    """Созданная заявка: Super, без таймслота, точка, кластеры и штуки по поставкам = план."""
+def check_order(order_page, plan, dropoff_id=None, series_order_ids=()):
+    """Созданная заявка: новая (не одна из заявок серии), Super, без таймслота, точка, кластеры и штуки = план."""
     o = order_page.get("order") or {}
     problems = []
+    if str(o.get("order_id")) in {str(x) for x in series_order_ids or ()}:
+        problems.append("эта заявка уже есть в серии — не новая копия: остановить создания и разобраться")
     if (o.get("tags") or {}).get("super") is not True:
         problems.append("у заявки нет метки Super")
     if o.get("timeslot") is not None:
@@ -208,7 +211,7 @@ def main():
         elif a.command == "check":
             r = check_calculation(d["calculation"], d["plan"], d.get("require_super", False))
         else:
-            r = check_order(d["order"], d["plan"], d.get("dropoff_id"))
+            r = check_order(d["order"], d["plan"], d.get("dropoff_id"), d.get("series_order_ids") or ())
     except (SuperError, KeyError, ValueError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(2)

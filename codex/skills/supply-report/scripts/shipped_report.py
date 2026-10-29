@@ -59,24 +59,36 @@ def _table(head, rows):
 
 
 def packaging(rows, orders):
-    """По отгруженной поставке: штук в месте; фасовка N — если все места по N."""
-    cargo = {}
+    """По отгруженной поставке и товару: штук этого товара в каждом месте, где он есть; фасовка N — все такие места
+    по N. Место, где лежат и другие товары, — «в местах с другими товарами»."""
+    per, unread, shared = {}, set(), set()
     for page in orders or []:
         for c in page.get("cargoes") or []:
-            units = sum(int(i.get("quantity") or 0) for i in c.get("items") or [])
-            cargo.setdefault(str(c["supply_id"]), []).append((c.get("type"), units if c.get("items") else None))
+            sid, items = str(c["supply_id"]), c.get("items")
+            if not items:
+                unread.add(sid)
+                continue
+            units = {}
+            for i in items:
+                units[str(i.get("sku"))] = units.get(str(i.get("sku")), 0) + int(i.get("quantity") or 0)
+            for sku, n in units.items():
+                per.setdefault((sid, sku), []).append(n)
+                if len(units) > 1:
+                    shared.add((sid, sku))
     agg = {}
     for r in rows:
-        places = cargo.get(str(r["supply_id"]))
-        if not places:
-            key = "места не прочитаны"
-        elif any(u is None for _, u in places):
+        k = (str(r["supply_id"]), str(r["sku"]))
+        places = per.get(k) or []
+        if k[0] in unread:
             key = "состав мест не прочитан"
+        elif not places:
+            key = "места не прочитаны"
+        elif k in shared:
+            key = "в местах с другими товарами"
         else:
-            sizes = {u for _, u in places}
-            key = f"по {sizes.pop()} шт" if len(sizes) == 1 else "смешанная"
+            key = f"по {places[0]} шт" if len(set(places)) == 1 else "смешанная"
         a = agg.setdefault((r.get("offer_id") or r["sku"], key), {"places": 0, "units": 0, "days": set()})
-        a["places"] += len(places or [])
+        a["places"] += len(places)
         a["units"] += int(r["quantity"])
         if r["_day"]:
             a["days"].add(r["_day"].isoformat())

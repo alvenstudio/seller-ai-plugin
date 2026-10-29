@@ -3,7 +3,8 @@
 Товарная этикетка одной командой: ответ `products_get` (сохранённый агентом в файл) + labels-config.json → PDF и PNG.
 
 Сеть не нужна: данные карточки агент берёт инструментами Seller AI `products_get` и `products_content_get`, реквизиты —
-из локального labels-config.json, значения из чата — флагами. Характеристики карточки (состав, КБЖУ, срок, хранение,
+из локального labels-config.json, а юрлицо и ИНН владельца без него — из ответа `stores_seller_info_get`
+(`--seller-info`), значения из чата — флагами. Характеристики карточки (состав, КБЖУ, срок, хранение,
 страна, масса) — ответ `products_content_get`, сохранённый в файл, или любой список в формате Ozon (`attributes[]`: `id`
 или `attribute_id`, `values[].value`): `--attributes` берёт их сами — состав 8050, белки 7584, жиры 7585, углеводы 7586,
 ккал 7609, срок 7578 (дни → «12 месяцев»), хранение 8787, страна 4389, масса 4383 (только сверка с названием).
@@ -27,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from ean13 import normalize_ean13                                         # noqa: E402
-from label_config import DEFAULT_CONFIG, build_label_data, entity_for, load, product_config  # noqa: E402
+from label_config import DEFAULT_CONFIG, build_label_data, entity_for, load, product_config, seller_entity  # noqa: E402
 
 WEIGHT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(кг|г|гр|грамм|мл|л)\b", re.I)
 # Характеристики Ozon, которые идут на этикетку (id атрибута).
@@ -127,13 +128,28 @@ def product_data(answer: dict) -> tuple[str, dict, list[str], list[str]]:
     return str(item.get("sku") or ""), data, barcodes, warns
 
 
+CARD_FIELDS = {"composition": ("состав", "--composition"), "kbzhu": ("КБЖУ", "--kbzhu"),
+               "shelf_life": ("срок годности", "--shelf-life"), "storage_conditions": ("условия хранения", "--storage"),
+               "country": ("страна", "--country")}
+KBZHU = {"protein": "белки", "fat": "жиры", "carbs": "углеводы", "calories": "ккал"}
+
+
+def shown(value) -> str:
+    """Значение поля для предупреждения: КБЖУ — «белки 5.2, жиры 0.3, …»."""
+    if isinstance(value, dict):
+        return ", ".join(f"{KBZHU.get(k, k)} {v}" for k, v in value.items())
+    return str(value)
+
+
 def apply_card(d: dict, card: dict, name_weight: str) -> list[str]:
-    """Характеристики карточки поверх настроек товара; расхождения — предупреждениями. Масса — из названия."""
+    """Характеристики карточки поверх настроек товара; расхождение — предупреждение с обоими значениями. Масса — из
+    названия."""
     warns = []
-    for k in ("composition", "kbzhu", "shelf_life", "storage_conditions", "country"):
+    for k, (what, flag) in CARD_FIELDS.items():
         if card.get(k):
             if d.get(k) and d[k] != card[k]:
-                warns.append(f"{k}: в labels-config.json «{d[k]}», в карточке «{card[k]}» — взято из карточки")
+                warns.append(f"{what}: в карточке «{shown(card[k])}» — взято; в labels-config.json «{shown(d[k])}» — "
+                             f"спросить, какое оставить (сохранённое — флагом {flag})")
             d[k] = card[k]
     attr_g, name_g = grams(f"{card.get('weight_attr', '')} г"), grams(name_weight)
     if attr_g is not None and name_g is not None and abs(attr_g - name_g) > 0.001:
@@ -146,6 +162,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Товарная этикетка по ответу products_get")
     ap.add_argument("--product", required=True, help="JSON — ответ products_get")
     ap.add_argument("--attributes", help="JSON — ответ products_content_get или характеристики в формате Ozon (attributes[])")
+    ap.add_argument("--seller-info", help="JSON — ответ stores_seller_info_get: юрлицо и ИНН владельца по умолчанию")
     ap.add_argument("--store", required=True, help="store_id Seller AI")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--title", help="заголовок (короткое название КАПСОМ)")
@@ -156,6 +173,7 @@ def main(argv=None):
     ap.add_argument("--inn"); ap.add_argument("--kpp"); ap.add_argument("--address"); ap.add_argument("--phone")
     ap.add_argument("--packing-date", help="ДД.ММ.ГГГГ")
     ap.add_argument("--shelf-life"); ap.add_argument("--storage"); ap.add_argument("--composition")
+    ap.add_argument("--kbzhu", help='JSON {"protein": "…", "fat": "…", "carbs": "…", "calories": "…"}')
     ap.add_argument("--country"); ap.add_argument("--weight", help="«400 г», «0,45 кг ± 0,02 кг»")
     ap.add_argument("--barcode", help="EAN-13 (или 12 цифр без контрольной) вместо кода карточки")
     ap.add_argument("--no-barcode", action="store_true", help="этикетка без штрихкода")
@@ -171,10 +189,15 @@ def main(argv=None):
     cfg_all = load(a.config)
     cfg = product_config(cfg_all, a.store, sku)
 
+    seller = {}
+    if a.seller_info:
+        seller = seller_entity(json.loads(Path(a.seller_info).read_text(encoding="utf-8")))
+        if not seller:
+            warns.append("в ответе stores_seller_info_get нет юрлица: Seller AI ещё не прочитал реквизиты продавца")
     if a.packer_name:
         entity = {"legal_entity": a.packer_name, "inn": "", "kpp": "", "address": "", "phone": ""}
     else:
-        entity, w = entity_for(cfg_all, a.store, a.packer or cfg.get("packer"))
+        entity, w = entity_for(cfg_all, a.store, a.packer or cfg.get("packer"), seller)
         if w:
             warns.append(w)
 
@@ -188,6 +211,8 @@ def main(argv=None):
                  ("barcode", a.barcode), ("label_type", a.label_type)):
         if v:
             d[k] = v
+    if a.kbzhu:
+        d["kbzhu"] = json.loads(a.kbzhu)
     if a.no_title:
         d["title"] = ""; d["name"] = ""          # пустой title падает обратно на name
     elif a.title:
@@ -197,19 +222,29 @@ def main(argv=None):
     if a.no_barcode:
         d["barcode"] = ""
 
+    if not a.no_title and not d.get("title"):
+        lost = ("сверху будет полное название карточки мелким шрифтом" if d["label_type"] == "barcode_only"
+                else "названия товара на этикетке не будет")
+        warns.append(f"заголовок не задан — {lost}: по умолчанию — короткое название КАПСОМ из названия карточки, "
+                     f"--title «…»")
     if d["label_type"] != "barcode_only":
         for k, what in (("composition", "состав"), ("kbzhu", "КБЖУ"), ("shelf_life", "срок годности"),
-                        ("storage_conditions", "условия хранения"), ("weight", "масса нетто")):
+                        ("storage_conditions", "условия хранения")):
             if not d.get(k):
-                warns.append(f"нет: {what} — характеристик карточки Seller AI пока не отдаёт: взять у пользователя "
-                             f"(флагом или в labels-config.json) или из характеристик (--attributes)")
+                warns.append(f"нет: {what} — " + ("ни в характеристиках карточки, ни в labels-config.json: взять у "
+                                                  "пользователя" if a.attributes else
+                                                  "передайте --attributes (ответ products_content_get) или возьмите у "
+                                                  "пользователя"))
+        if not d.get("weight"):
+            warns.append("нет: масса нетто — в названии карточки её нет: --weight со слов пользователя")
         for k in ("legal_entity", "inn", "address"):
             if not d.get(k):
                 warns.append(f"пустое поле {k}")
         if not d.get("country") and d.get("show_country", True):
             warns.append("страна не задана — строка страны не выведена")
     if not d.get("barcode") and not a.no_barcode:
-        warns.append("нет EAN-13: передайте --barcode (новый код к карточке в Seller AI пока не привязать)")
+        warns.append("нет EAN-13: новый код — ean13.py new, привязать к карточке products_barcodes_add "
+                     "(или --barcode)")
 
     w_mm, h_mm = (float(x) for x in a.size.lower().split("x"))
     offer = (answer.get("item") or answer).get("offer_id") or sku or "товар"

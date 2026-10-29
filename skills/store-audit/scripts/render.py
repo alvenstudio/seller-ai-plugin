@@ -216,9 +216,16 @@ def build_slides(rep):
   <div class="tile"><div class="v">{n(sales / 1e6, 1)} млн</div><div class="l">реализация</div></div>
   <div class="tile"><div class="v">{n(tot["accrued"] / 1e6, 1)} млн</div><div class="l">начислено Ozon</div></div>
   <div class="tile"><div class="v">{n(tot["sold_units"])}</div><div class="l">продано единиц</div></div>
-</div>""")
+</div>""" + (f"""
+<p class="note">⚠ Итог не сошёлся с «Начислениями» Ozon на {n(rep["reconciliation_gap"], 2)} ₽ — цифры предварительные.</p>"""
+            if rep.get("reconciliation_gap") else ""))
 
     # 2. воронка
+    paid = tot.get("payments")
+    accrued_note = "то, что площадка должна выплатить"
+    if paid is not None:
+        accrued_note = f"выплачено {n(paid)} ₽" + (f", на балансе на конец периода {n(tot['balance_end'])} ₽"
+                                                    if tot.get("balance_end") is not None else "")
     slides.append(f"""
 <p class="kicker">Что происходит с каждым рублём</p>
 <h2>До вас доходит<br><span class="chip">{_share(tot["accrued"], sales)}%</span></h2>
@@ -226,7 +233,7 @@ def build_slides(rep):
   <div class="step"><div><div class="l">Реализация</div><div class="s">заплатили покупатели, включая баллы Ozon, за вычетом возвратов</div></div><div class="v">{n(sales)}</div></div>
   <div class="step"><div><div class="l">Вознаграждение Ozon</div><div class="s">{_share(tot["commission"], sales)}% от реализации</div></div><div class="v neg">{n(tot["commission"])}</div></div>
   <div class="step"><div><div class="l">Услуги Ozon</div><div class="s">{len(rep["services"]["detail"])} видов начислений</div></div><div class="v neg">{n(tot["services"])}</div></div>
-  <div class="step dark"><div><div class="l">Начислено Ozon</div><div class="s">то, что площадка должна выплатить</div></div><div class="v">{n(tot["accrued"])}</div></div>
+  <div class="step dark"><div><div class="l">Начислено Ozon</div><div class="s">{e(accrued_note)}</div></div><div class="v">{n(tot["accrued"])}</div></div>
   <div class="step"><div><div class="l">Себестоимость и налог</div><div class="s">{n(tot["sold_units"])} проданных единиц, {n(tot["disposed_units"])} утилизировано</div></div><div class="v neg">{n(-(tot["cogs"] + tot["disposal_cogs"] + tot["tax"]))}</div></div>
   <div class="step dark"><div><div class="l">Чистая прибыль</div><div class="s">{_share(tot["net"], sales)}% от реализации</div></div><div class="v">{n(tot["net"])}</div></div>
 </div>""")
@@ -350,18 +357,21 @@ def build_slides(rep):
             f'<tr><td>{e(x["offer_id"])}</td><td class="q">{n(x["units"])}</td>'
             f'<td class="q">{n(x["accrual"])}</td><td class="q">{n(x["commission_pct"], 1)}%</td>'
             f'<td class="q">{n(x["logistics"])}</td><td class="q">{n(x["cost"])}</td>'
+            f'<td class="q">{n(x.get("ads"))}</td>'
             f'<td class="{"neg" if x["margin"] < 0 else ""}">{n(x["margin"])}</td></tr>'
             for x in top)
         worst = min(top, key=lambda x: x["margin_pct"])
         best = max(top, key=lambda x: x["margin_pct"])
+        before = (f' До рекламы (прибыль плюс реклама — вклад товара) у лучшего {n(best["before_ads"])} ₽, у худшего '
+                  f'{n(worst["before_ads"])} ₽.' if best.get("before_ads") is not None else "")
         slides.append(f"""
 <p class="kicker">Сколько остаётся с одной продажи</p>
 <h2>Прибыль<br>с единицы</h2>
-<table><thead><tr><th>Товар</th><th>Шт</th><th>Чек</th><th>Вознагр.</th><th>Логист.</th><th>Себест.</th><th>Прибыль</th></tr></thead>
+<table><thead><tr><th>Товар</th><th>Шт</th><th>Чек</th><th>Вознагр.</th><th>Логист.</th><th>Себест.</th><th>Реклама</th><th>Прибыль</th></tr></thead>
 <tbody>{trs}</tbody></table>
 <p class="note">Чек — реализация на проданную единицу (нетто возвратов); прибыль — чистая прибыль товара по начислениям
-на единицу: все его начисления, себестоимость и налог. Лучший — {e(best["offer_id"])} ({n(best["margin"])} ₽,
-{n(best["margin_pct"], 1)}%), худший — {e(worst["offer_id"])} ({n(worst["margin"])} ₽, {n(worst["margin_pct"], 1)}%).</p>""")
+на единицу: все его начисления, реклама, себестоимость и налог. Лучший — {e(best["offer_id"])} ({n(best["margin"])} ₽,
+{n(best["margin_pct"], 1)}%), худший — {e(worst["offer_id"])} ({n(worst["margin"])} ₽, {n(worst["margin_pct"], 1)}%).{e(before)}</p>""")
 
     # невыкупы и возвраты
     npk = rep.get("non_pickup") or {}
@@ -399,6 +409,9 @@ def build_slides(rep):
 
     # остатки по кластерам
     if st.get("total"):
+        back = st.get("returns_on_warehouses")
+        returns_note = (f" Без возвратов от покупателей и товара к вывозу ({n(back)} шт): они тоже на складах Ozon, но в "
+                        "«Возвраты и вывоз»." if back else "")
         cl = list((st.get("by_cluster") or {}).items())[:10]
         trs = "".join(f'<tr><td>{e(k)}</td><td class="q">{n(v)}</td>'
                       f'<td class="q">{_share(v, st["total"])}%</td></tr>' for k, v in cl)
@@ -412,7 +425,7 @@ def build_slides(rep):
   <div class="tile"><div class="v">{n(st.get("assets_total"))}</div><div class="l">₽ всех активов с балансом</div></div>
 </div>
 <p class="note">Товар на складах Ozon на {e((st.get("as_of") or "")[:16].replace("T", " "))}, включая брак, излишки и
-истекающий срок. Заявки на поставку ({n(st.get("requested"))} шт) — не активы.</p>""")
+истекающий срок. Заявки на поставку ({n(st.get("requested"))} шт) — не активы.{e(returns_note)}</p>""")
 
     # материальный баланс FBO
     mb = rep.get("material_balance")
@@ -432,7 +445,8 @@ def build_slides(rep):
   <div class="step"><div><div class="l">Излишек</div><div class="s">у Ozon больше, чем по журналу</div></div><div class="v">{n(mb["surplus_units"])}</div></div>
 </div>
 <table><thead><tr><th>Товар</th><th>По журналу</th><th>У Ozon</th><th>Разница</th></tr></thead><tbody>{trs}</tbody></table>
-<p class="note">Недостача по себестоимости — {n(mb["shortage_cost"])} ₽. На здоровом магазине это доли процента от принятого;
+<p class="note">На сегодня, за всю историю магазина — не на конец периода аудита.
+Недостача по себестоимости — {n(mb["shortage_cost"])} ₽. На здоровом магазине это доли процента от принятого;
 2–3 % и больше — сначала ищите ошибку данных (акт приёмки ещё не пришёл, поставка учтена по заявке), а не потери.</p>""")
 
     # дополнительные строки от пользователя
@@ -455,12 +469,14 @@ def render_html(rep, slides, out_path):
     name = rep["meta"].get("store_name") or rep["meta"].get("store_id") or ""
     body = "".join(f'<section class="slide">{s}</section>' for s in slides)
     warn = "".join(f"<li>{e(w)}</li>" for w in rep.get("warnings") or [])
+    check = (f"итог НЕ сошёлся с «Начислениями» на {n(rep['reconciliation_gap'], 2)} ₽ — цифры предварительные"
+             if rep.get("reconciliation_gap") else "итог сходится с «Начислениями» до копейки")
     doc = (f"<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
            f"<title>Аудит {e(name)}</title>\n<style>{DECK_CSS}</style>\n"
            f'<div class="deck">{body}</div>\n'
            f'<div class="foot"><p>Источник — Seller AI: отчёт «Чистая прибыль» и «Юнит-экономика → По начислениям» '
-           f'(итог сходится с «Начислениями» до копейки), «Активы», партии поставок FBO, «Вывоз и утилизация» и '
-           f'«Списанные товары».</p>'
+           f'({e(check)}), «Активы», партии поставок FBO, «Вывоз и утилизация», «Списанные товары»'
+           f'{" и «Баланс»" if rep.get("balance") else ""}.</p>'
            f'{"<ul>" + warn + "</ul>" if warn else ""}</div>')
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(doc)

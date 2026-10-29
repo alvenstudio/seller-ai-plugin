@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Точный объём из целых поставок готовых Super-заявок — чистый подбор над ответами `supplies_orders_get`.
 
-    python3 kits_select.py rows    in.json  # {"sku", "orders": [ответы supplies_orders_get], "now": "…Z"} → кандидаты
+    python3 kits_select.py rows    in.json  # {"sku", "orders": [ответы supplies_orders_get], "now": "…Z",
+                                            #  "dropoff_ids": [точки отгрузки, откуда везут] | null} → кандидаты
     python3 kits_select.py select  in.json  # {"rows": [...], "target": 6000 | "targets": [6000, 3000],
                                             #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
     python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
@@ -9,7 +10,8 @@
 
 Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора: точная сумма →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
-заявок → меньше поставок. «Начатая» заявка — та, часть поставок которой уже отгружена или уже взята в комплекты
+заявок → меньше поставок → при равенстве — поставки с более ранним слотом (без слота — последними). «Начатая»
+заявка — та, часть поставок которой уже отгружена или уже взята в комплекты
 (`exclude_supply_ids`), а часть ещё ждёт. Несколько объёмов (`targets`) — непересекающиеся комплекты: поставки
 первого не входят во второй, а их заявки для второго — начатые.
 """
@@ -17,7 +19,7 @@ import argparse
 import itertools
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 SHIPPED = {"ACCEPTED_AT_SUPPLY_WAREHOUSE", "IN_TRANSIT", "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
            "REPORTS_CONFIRMATION_AWAITING", "REPORT_REJECTED", "COMPLETED"}
@@ -31,9 +33,22 @@ def _ts(v):
     return datetime.fromisoformat(v.replace("Z", "+00:00")) if v else None
 
 
-def rows_from_orders(order_pages, sku, now=None):
-    """Кандидаты и причины отказа по каждой поставке: Super-заявка, поставка READY_TO_SUPPLY, один SKU, места заполнены."""
+_LAST = datetime.max.replace(tzinfo=timezone.utc)  # строка без слота — после всех слотов
+
+
+def _slot_key(v):
+    """Ключ сортировки по началу слота: без пояса — UTC (так его отдаёт страница заявки), без слота — в конец."""
+    t = _ts(v)
+    if t is None:
+        return _LAST
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
+    """Кандидаты и причины отказа по каждой поставке: Super-заявка, поставка READY_TO_SUPPLY, один SKU, места заполнены,
+    точка отгрузки — из `dropoff_ids` (откуда пользователь везёт), если они заданы."""
     sku, now_ts = str(sku), _ts(now) if now else None
+    points = {str(x) for x in dropoff_ids} if dropoff_ids else None
     rows, rejected = [], []
     for page in order_pages:
         o = page.get("order") or {}
@@ -48,6 +63,7 @@ def rows_from_orders(order_pages, sku, now=None):
         supplies = page.get("supplies") or []
         started = any(s.get("state") in SHIPPED for s in supplies)
         slot = o.get("timeslot") or {}
+        dropoff = o.get("dropoff") or {}
         for s in supplies:
             sid = str(s["supply_id"])
             base = {"order_id": oid, "order_number": o.get("order_number"), "supply_id": sid,
@@ -55,6 +71,8 @@ def rows_from_orders(order_pages, sku, now=None):
             why = None
             if (o.get("tags") or {}).get("super") is not True:
                 why = "заявка без метки Super"
+            elif points is not None and str(dropoff.get("id")) not in points:
+                why = f"другая точка отгрузки: {dropoff.get('name') or dropoff.get('id')}"
             elif s.get("state") != "READY_TO_SUPPLY":
                 why = f"поставка {s.get('state')}"
             elif set(comp.get(sid, {})) != {sku}:
@@ -73,7 +91,8 @@ def rows_from_orders(order_pages, sku, now=None):
             sizes = sorted({sum(int(i["quantity"]) for i in c["items"]) for c in cargo[sid]})
             rows.append(dict(base, quantity=comp[sid][sku], cargo_ids=sorted(str(c["cargo_id"]) for c in cargo[sid]),
                              units_per_place=sizes, started=started, timeslot_from=slot.get("from"),
-                             timeslot_local=slot.get("local_from"), dropoff=(o.get("dropoff") or {}).get("name")))
+                             timeslot_local=slot.get("local_from"), dropoff=dropoff.get("name"),
+                             dropoff_id=None if dropoff.get("id") is None else str(dropoff["id"])))
     return {"rows": rows, "rejected": rejected}
 
 
@@ -91,7 +110,9 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
     rows = _free_rows(rows, exclude)
     if not rows:
         raise KitError("Нет свободных подходящих поставок")
-    rows.sort(key=lambda r: (not r.get("started"), str(r["order_id"]), -int(r["quantity"]), str(r["supply_id"])))
+    # Ранний слот — первым (без слота — в конце): последний разрыв ничьей берёт поставки с меньшими номерами строк.
+    rows.sort(key=lambda r: (not r.get("started"), _slot_key(r.get("timeslot_from")), str(r["order_id"]),
+                             -int(r["quantity"]), str(r["supply_id"])))
     q = [int(r["quantity"]) for r in rows]
     n, mask = len(rows), (1 << (target + 1)) - 1
     reach = [0] * (n + 1)
@@ -111,7 +132,7 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
         units_started = sum(q[i] for i in chosen if rows[i].get("started"))
         clusters = len({rows[i]["cluster_id"] for i in chosen})
         new_orders = len({rows[i]["order_id"] for i in chosen if not rows[i].get("started")})
-        return (completed, units_started, clusters, -new_orders, -len(chosen))
+        return (completed, units_started, clusters, -new_orders, -len(chosen), -sum(chosen))
 
     best, best_score, nodes, chosen, used_clusters = None, None, 0, [], {}
     started_left = [0] * (n + 1)
@@ -217,7 +238,7 @@ def main():
     d = json.loads(sys.stdin.read() if a.input == "-" else open(a.input, encoding="utf-8").read())
     try:
         if a.command == "rows":
-            r = rows_from_orders(d["orders"], d["sku"], d.get("now"))
+            r = rows_from_orders(d["orders"], d["sku"], d.get("now"), d.get("dropoff_ids"))
         elif a.command == "by_need":
             r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or ())
         elif d.get("targets"):

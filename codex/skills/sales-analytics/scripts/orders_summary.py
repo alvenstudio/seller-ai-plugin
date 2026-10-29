@@ -59,6 +59,8 @@ def summarize(pages, group=("sku",), exclude_statuses=(), exclude_postings=()):
                      "avg_price": str((a["amount"] / (a["units"] - a["unknown_price_units"])).quantize(Decimal("0.01")))
                      if a["units"] > a["unknown_price_units"] else None,
                      "payout": str(a["payout"].quantize(Decimal("0.01"))) if a["payout_units"] else None,
+                     "avg_payout": str((a["payout"] / a["payout_units"]).quantize(Decimal("0.01")))
+                     if a["payout_units"] else None,
                      "payout_unknown_units": a["units"] - a["payout_units"], "postings": len(a["postings"])})
     return {"group": list(group), "rows": rows, "postings": len(seen),
             "units": sum(r["units"] for r in rows), "amount": str(sum(Decimal(r["amount"]) for r in rows))}
@@ -69,16 +71,17 @@ def _rub(v):
 
 
 def render(res):
-    head = [{"sku": "Товар", "day": "День"}[g] for g in res["group"]] + ["Штук", "Сумма", "Ср. цена", "Выплата", "Отправлений"]
+    head = [{"sku": "Товар", "day": "День"}[g] for g in res["group"]] + ["Штук", "Сумма", "Ср. цена", "Выплата", "Ср. выплата",
+                                                                          "Отправлений"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in res["rows"]:
         cells = []
         for g in res["group"]:
             cells.append(f"[{r['offer_id'] or r['sku']}](https://www.ozon.ru/product/{r['sku']})" if g == "sku" else r["day"] or "—")
         payout = _rub(r["payout"]) + (f" (без выплаты {r['payout_unknown_units']} шт)" if r["payout"] and r["payout_unknown_units"] else "")
-        cells += [str(r["units"]), _rub(r["amount"]), _rub(r["avg_price"]), payout, str(r["postings"])]
+        cells += [str(r["units"]), _rub(r["amount"]), _rub(r["avg_price"]), payout, _rub(r["avg_payout"]), str(r["postings"])]
         lines.append("| " + " | ".join(cells) + " |")
-    lines.append(f"| **ИТОГО** |" + " |" * (len(res["group"]) - 1) + f" **{res['units']}** | **{_rub(res['amount'])}** | | | "
+    lines.append(f"| **ИТОГО** |" + " |" * (len(res["group"]) - 1) + f" **{res['units']}** | **{_rub(res['amount'])}** | | | | "
                  f"**{res['postings']}** |")
     return "\n".join(lines) + "\n"
 

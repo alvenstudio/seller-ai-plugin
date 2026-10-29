@@ -6,14 +6,18 @@
     python3 build_report.py --profit profit-2025.json profit-2026.json \
         --accruals accruals-2025.json accruals-2026.json \
         [--assets assets.json] [--batches batches.json] [--non-pickups np-*.json] [--seller seller.json] \
-        [--removals removals.json] [--decommissioned dg-*.json] [--config audit-config.json] --out report.json
+        [--removals removals.json] [--decommissioned dg-*.json] [--balance balance.json] [--config audit-config.json] \
+        --out report.json
 
 --profit    ответы economics_profit_get с group=month (весь период одним окном или окна подряд, без пересечений);
 --accruals  ответы unit_economics_accruals_list за те же окна;
 --assets    ответ assets_summary_get (остатки и активы сейчас);
 --batches   ответ cost_batches_list без sku (сверка остатка FBO с журналом партий);
 --non-pickups  страницы finance_accruals_list с type_ids=6,40,59 за период: невыкупы и возвраты — уникальные отправления
-            (unit_number) и сумма этих услуг; без них — non_pickup_count конфига (строк, а не отправлений);
+            (unit_number); рубли — категория «Возвраты и невыкупы» отчёта; без страниц — non_pickup_count конфига (строк,
+            а не отправлений);
+--balance   ответы balance_history_list за период (окна подряд): «выплачено» и баланс на конец периода, сверка «Начислено»
+            с «Балансом» (Ozon считает его отдельным отчётом);
 --seller    ответ stores_seller_info_get: юрлицо, ИНН и система налогообложения Ozon на обложку;
 --removals  ответы removals_list за период (date_from, date_to; хватает limit=1 — нужны totals и coverage): вывоз со складов;
 --decommissioned  страницы decommissioned_goods_list за период (все, limit 500): причины списаний и списанное по товарам;
@@ -161,12 +165,15 @@ def unit_economics(items):
         check = r["sales"] / net
         commission = -r["amounts"].get("commission", 0.0) / net
         logistics = -(r["amounts"].get("logistics", 0.0) + r["amounts"].get("returns_logistics", 0.0)) / net
+        ads = (-r["amounts"].get("advertising", 0.0) / net) or 0.0          # без «−0» в таблице
         profit = r["profit"] / net
         out.append({
             "offer_id": r["offer_id"] or r["sku"], "name": r["name"], "units": net, "accrual": check,
             "commission": commission, "commission_pct": 100 * commission / check if check else 0.0,
-            "logistics": logistics, "cost": r["unit_cost"], "margin": profit,
+            "logistics": logistics, "cost": r["unit_cost"], "ads": ads, "margin": profit,
             "margin_pct": 100 * profit / check if check else 0.0,
+            # «Вклад» прежнего аудита — что остаётся с единицы до рекламы.
+            "before_ads": profit + ads,
         })
     out.sort(key=lambda x: -x["units"])
     return out
@@ -206,6 +213,9 @@ def assets_part(assets):
         "by_offer": dict(by_offer.most_common()),
         "inbound": int((groups.get("supply_transit") or {}).get("units") or 0),
         "removal": sum(int((groups.get(k) or {}).get("units") or 0) for k in ("removal_ready", "removal_in_transit")),
+        # Лежат на складах Ozon, но «Активы» ведут их в «Возвратах и вывозе», а не в остатке.
+        "returns_on_warehouses": sum(int((groups.get(k) or {}).get("units") or 0)
+                                     for k in ("customer_returns", "removal_ready")),
         "goods_cost": num(summary.get("goods_cost")),
         "goods_retail": num(summary.get("goods_retail")),
         "assets_total": num(summary.get("total")),
@@ -243,7 +253,9 @@ def material_balance(batches):
 
 
 def non_pickups(pages):
-    """Невыкупы и возвраты по строкам начислений 6, 40, 59: уникальные отправления и сумма услуг; повторы строк страниц — раз."""
+    """Невыкупы и возвраты по начислениям с услугами 6, 40, 59: уникальные отправления; повторы строк страниц — раз.
+    `accruals_total` — сумма начислений целиком (фильтр отдаёт начисление, где есть хоть одна такая услуга, со всеми его
+    частями), не сумма этих услуг: рубли невыкупов — категория «Возвраты и невыкупы» отчёта."""
     seen, units, amount = set(), set(), 0.0
     for page in pages:
         for r in page.get("items") or []:
@@ -254,7 +266,30 @@ def non_pickups(pages):
             amount += float(r.get("amount") or 0)
             if r.get("unit_number"):
                 units.add(str(r["unit_number"]))
-    return {"count": len(units), "rows": len(seen), "accruals_amount": round(amount, 2), "basis": "postings"}
+    return {"count": len(units), "rows": len(seen), "accruals_total": round(amount, 2), "basis": "postings"}
+
+
+def balance_part(answers, period):
+    """«История баланса» (balance_history_list) за период аудита: начислено, выплачено и баланс «Интернет Решений» на
+    начало и конец. Окна подряд складываются; None — ответов нет или итогов в них нет."""
+    rows = []
+    for a in answers or []:
+        t = a.get("totals")
+        if t:
+            p = a.get("period") or {}
+            rows.append((p.get("from") or t.get("from") or "", p.get("to") or t.get("to") or "", t))
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
+    covered = {"from": rows[0][0] or None, "to": rows[-1][1] or None}
+    return {
+        "period": covered,
+        "matches": covered["from"] in (None, period["from"]) and covered["to"] in (None, period["to"]),
+        "accrued": sum(zero(t.get("accrued")) for _, _, t in rows),
+        "payments": -sum(zero(t.get("paid")) for _, _, t in rows),
+        "start": num(rows[0][2].get("start")),
+        "end": num(rows[-1][2].get("end")),
+    }
 
 
 def seller_part(seller):
@@ -329,7 +364,7 @@ def decommissioned_part(pages):
 
 
 def build(profit_answers, accrual_answers, assets=None, batches=None, config=None, non_pickup_pages=None,
-          seller=None, removal_answers=None, decommissioned_pages=None):
+          seller=None, removal_answers=None, decommissioned_pages=None, balance_answers=None):
     config = config or {}
     p = merge_profit(profit_answers)
     items, reconciliation = merge_accruals(accrual_answers)
@@ -363,11 +398,26 @@ def build(profit_answers, accrual_answers, assets=None, batches=None, config=Non
         warnings.append(f"товаров с себестоимостью «из Ozon» (net_price карточки): {q['ozon_cost_skus']}")
     if p["estimate"]:
         warnings.append(f"в прибыли — реклама, которую Ozon ещё не списал, по статистике: {p['estimate']:.2f} ₽")
+    gap = 0.0
     for rec in reconciliation:
         diff = num(rec.get("difference"))
         if diff:
+            gap += abs(diff)
             warnings.append(f"сверка с «Начислениями» за {rec['period']['from']}–{rec['period']['to']}: "
-                            f"расхождение {diff:.2f} ₽ — дефект расчёта Seller AI")
+                            f"расхождение {diff:.2f} ₽ — дефект расчёта Seller AI: итог аудита не точный, не выдавать "
+                            "его за окончательный; сообщить об ошибке (навык feedback)")
+    balance = balance_part(balance_answers, p["period"])
+    if balance:
+        totals["payments"] = balance["payments"]
+        totals["balance_end"] = balance["end"]
+        if not balance["matches"]:
+            warnings.append(f"«Баланс» передан за {balance['period']['from']}–{balance['period']['to']}, а аудит — за "
+                            f"{p['period']['from']}–{p['period']['to']}: сверка «Начислено» с «Балансом» не сделана")
+        elif p["scheme"] in (None, "all") and abs(s["accrued"] - balance["accrued"]) >= 1:
+            warnings.append(f"начислено за период по отчёту — {s['accrued']:.2f} ₽, по «Балансу» («Интернет Решения») — "
+                            f"{balance['accrued']:.2f} ₽, разница {s['accrued'] - balance['accrued']:.2f} ₽: услуги «Озон "
+                            "Технологии», которые «Баланс» ведёт отдельно, или начисления периода загружены не все "
+                            "(тогда цифры занижены) — сверить с кабинетом и сказать")
     mb = material_balance(batches)
     if mb and mb["unknown_cost_units"]:
         warnings.append(f"расхождение партий без себестоимости: {mb['unknown_cost_units']} шт — не оценено в рублях")
@@ -399,6 +449,8 @@ def build(profit_answers, accrual_answers, assets=None, batches=None, config=Non
         "material_balance": mb,
         "removals": removals,
         "decommissioned": decommissioned,
+        "balance": balance,
+        "reconciliation_gap": gap or None,
         "unallocated": q["unallocated"],
         "extra": config.get("extra", []),
         "warnings": warnings,
@@ -415,6 +467,7 @@ def main(argv=None):
     ap.add_argument("--seller")
     ap.add_argument("--removals", nargs="*")
     ap.add_argument("--decommissioned", nargs="*")
+    ap.add_argument("--balance", nargs="*")
     ap.add_argument("--config")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
@@ -424,7 +477,8 @@ def main(argv=None):
                    [load(f) for f in args.non_pickups] if args.non_pickups else None,
                    load(args.seller) if args.seller else None,
                    [load(f) for f in args.removals] if args.removals else None,
-                   [load(f) for f in args.decommissioned] if args.decommissioned else None)
+                   [load(f) for f in args.decommissioned] if args.decommissioned else None,
+                   [load(f) for f in args.balance] if args.balance else None)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     t = report["totals"]

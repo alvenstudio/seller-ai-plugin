@@ -14,13 +14,15 @@ description: "Отчёт по отгрузкам FBO через Seller AI: ск�
 1. **Товар.** По названию — `products_list` с `search` (кандидаты: `sku`, `offer_id`, `name`); несколько карточек —
    показать и спросить, или взять все по просьбе. По артикулу — сразу `offer_id`.
 2. **Строки.** `supplies_items_list` с `sku` (или `offer_id`; по одному значению за вызов),
-   `states=ACCEPTED_AT_SUPPLY_WAREHOUSE,IN_TRANSIT,ACCEPTANCE_AT_STORAGE_WAREHOUSE,REPORTS_CONFIRMATION_AWAITING,REPORT_REJECTED,COMPLETED`,
+   `supply_states=ACCEPTED_AT_SUPPLY_WAREHOUSE,IN_TRANSIT,ACCEPTANCE_AT_STORAGE_WAREHOUSE,REPORTS_CONFIRMATION_AWAITING,REPORT_REJECTED,COMPLETED`,
    `date_from`/`date_to` — **день таймслота** (дата отгрузки в поясе точки), `limit` 500 и все страницы по `offset`
    (`total`). Без товара — все товары магазина.
+   - Статус — **каждой поставки** (`supply_states`, в строке `supply_state`): в мультизаявке поставки живут по-разному.
+     `states` — статус **заявки**, для отчёта не годится: в заявке на согласовании актов бывают ещё не отгруженные
+     поставки. Скрипт тоже считает по `supply_state`.
    - «На точке отгрузки» (`ACCEPTED_AT_SUPPLY_WAREHOUSE`) — уже отгружено продавцом: без него недосчёт тысяч штук.
    - Не считаются: `DATA_FILLING`, `READY_TO_SUPPLY` (не отгружено), `CANCELLED`, `OVERDUE`,
-     `REJECTED_AT_SUPPLY_WAREHOUSE`. Статус — **каждой поставки** (`supply_state`): в мультизаявке поставки живут
-     по-разному.
+     `REJECTED_AT_SUPPLY_WAREHOUSE`.
    - Ответ с `sync_pending` или `streams[].last_success_at = null` — заявки ещё не загружены: так и сказать, не «0 шт».
 3. **Отчёт.**
    ```bash
@@ -34,13 +36,17 @@ description: "Отчёт по отгрузкам FBO через Seller AI: ск�
    заявки: `date_basis: "created"` (и тогда `date_from`/`date_to` в шаге 2 не ставить — они по таймслоту, фильтрует
    скрипт).
 4. **Фасовка** («сколько отгружено коробками по N шт»): по каждой заявке из строк — `supplies_orders_get`, ответы
-   передать в `orders`: по поставке видно, сколько штук в каждом грузоместе (`cargoes[].items`). Фасовка N — все места по
-   N; иначе «смешанная». Таблица: фасовка → мест / штук / дни отгрузки.
+   передать в `orders`: по поставке видно, сколько штук каждого товара в каждом грузоместе (`cargoes[].items`).
+   Считается по поставке и товару, только места с этим товаром: все по N — фасовка N, иначе «смешанная»; места, где он
+   лежит вместе с другими товарами, — отдельной строкой. Таблица: товар, фасовка → мест / штук / дни отгрузки.
 
 ## Что ещё сказать
 
 - Дата — день отгрузки по таймслоту (или дата создания заявки при `date_basis: created` — назвать, какая); строки без
   даты показаны отдельно.
 - **FBS** этим отчётом не считается: отправления FBS — `orders_list` (`scheme=fbs`, `sku` или `offer_id`, `date_from`/
-  `date_to` — дата создания). Спросили «сколько всего отгружено» — дать FBO + FBS и общий итог.
+  `date_to` — дата создания, `status=sent_by_seller,driver_pickup,delivering,delivered` — переданные в доставку; без
+  `status` в счёт попадут несобранные и отменённые), все страницы; по складам — `warehouse_name`, по дням —
+  `shipment_date` (МСК), штуки — `products[].quantity` этого товара. Спросили «сколько всего отгружено» — дать FBO + FBS
+  и общий итог.
 - Публикации в Notion и других внешних местах нет: отчёт — таблицы в ответе (или файл, если пользователь просит).
