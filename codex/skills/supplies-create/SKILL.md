@@ -241,8 +241,11 @@ python3 scripts/supply_plan.py plan plan_input.json
    коробок в кластер; `single_unit` — 1 шт., такие заявки Ozon отменял сразу после создания). Ошибки тела — 422 с
    `items[].code` (`unknown_cluster`, `sku_not_in_catalog`, `duplicate_sku`, `quantity_out_of_range`, `too_many_clusters`).
 2. `supplies_drafts_calculate` с `body: {revision}`. 202 или `calculation.status` `creating`, `in_progress`, `reading` —
-   опрашивать `supplies_drafts_get` раз в несколько секунд до `success`, `failed`, `error`. Расчёт `error` с
-   `outcome_unknown` — невидимый черновик Ozon истечёт сам; новый расчёт — снова квота.
+   опрашивать `supplies_drafts_get` раз в 10–20 секунд до `success`, `failed`, `error` — после 429 Ozon Seller AI сам
+   ждёт и читает тот же черновик Ozon, расчёт может идти несколько минут. Расчёт `error` с `timeout` или
+   `upstream_error` сразу не повторять: подождать минуту и перечитать черновик (`supplies_drafts_get`) — новый расчёт
+   создаёт новый черновик Ozon и тратит квоту (2 в минуту), которая и мешала. `outcome_unknown` — невидимый черновик
+   Ozon истечёт сам; новый расчёт — снова квота.
 3. Читать `calculation.clusters[]`: `availability` — `full` («примет все»), `partial` («примет X из Y шт.»:
    `accepted.units` из `requested_units`), `none` («не примет»: `reason_text`); `super` — кластер даёт Super;
    `timeslots_allowed` — все кластеры примут хоть часть. `success` и `full` без количеств ничего не доказывают:

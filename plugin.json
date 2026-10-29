@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "seller-ai",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "Работа с магазинами Ozon через Seller AI: заказы, поставки FBO, товары, цены, акции, продвижение, юнит-экономика, прибыль и отчёты. MCP-сервер Seller AI и навыки к нему.",
   "author": {
     "name": "Seller AI",
