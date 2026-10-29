@@ -69,9 +69,14 @@ def seller_entity(answer: dict | None) -> dict:
     """Ответ `stores_seller_info_get` → {"legal_entity", "inn"} владельца магазина; {} — Seller AI их не прочитал."""
     answer = answer or {}
     company = answer.get("company") or (answer.get("item") or {}).get("company") or {}
-    if not company.get("legal_name"):
+    name = (company.get("legal_name") or "").strip()
+    if not name:
         return {}
-    return {"legal_entity": company["legal_name"], "inn": company.get("inn") or ""}
+    # Ozon gives the form apart (`ownership_form`: «ИП», «ООО»…), and an ИП's `legal_name` is often the person alone.
+    form = (company.get("ownership_form") or "").strip()
+    if form and not name.upper().startswith(form.upper()):
+        name = f"{form} {name}"
+    return {"legal_entity": name, "inn": company.get("inn") or ""}
 
 
 def entity_for(data: dict, store_id: str, packer: str | None = None,

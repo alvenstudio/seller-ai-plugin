@@ -20,6 +20,7 @@
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -253,7 +254,10 @@ def main(argv=None):
     generate_label.generate_label_pdf(d, out, width_mm=w_mm, height_mm=h_mm)
     warns += generate_label.last_warnings
     if not a.no_png:
-        subprocess.run(["pdftoppm", "-png", "-r", "250", "-singlefile", out, out[:-4]], check=False)
+        if shutil.which("pdftoppm"):
+            subprocess.run(["pdftoppm", "-png", "-r", "250", "-singlefile", out, out[:-4]], check=False)
+        else:
+            warns.append("PNG-превью не сделано: нет pdftoppm (poppler); PDF готов — его и отдать")
     if a.json:
         print(json.dumps(d, ensure_ascii=False, indent=1))
     for x in warns:

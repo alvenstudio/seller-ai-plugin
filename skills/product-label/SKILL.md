@@ -16,7 +16,7 @@ git не попадает). Образец — `references/labels-config.example
 |---|---|
 | название, SKU, артикул, штрихкоды | `products_get` → `item.name`, `item.sku`, `item.offer_id`, `item.barcodes` |
 | масса нетто | из названия карточки («… 400 г»); вес из `details.dimensions` — брутто упаковки, на этикетку не идёт; масса характеристик (4383) — только сверка: «техническая» (502,5 г, 400,01 г — подгонка против дублей) на этикетку не идёт, расхождение назвать |
-| упаковщик / производитель, ИНН, КПП, адрес, телефон | `labels-config.json`: `legal_entities` и `stores.<store_id>.owner`; владельца там нет — юрлицо и ИНН из `stores_seller_info_get` (`company.legal_name`, `inn`; `--seller-info`), адреса и телефона в Seller AI нет — спросить и сохранить (`label_config.py set-entity … --owner-of <store_id>`) |
+| упаковщик / производитель, ИНН, КПП, адрес, телефон | `labels-config.json`: `legal_entities` и `stores.<store_id>.owner`; владельца там нет — юрлицо и ИНН из `stores_seller_info_get` (`company.legal_name` с формой `ownership_form` впереди — «ИП …», если в имени её нет; `inn`; `--seller-info`), адреса и телефона в Seller AI нет — спросить и сохранить (`label_config.py set-entity … --owner-of <store_id>`) |
 | состав, КБЖУ, срок годности, условия хранения, страна | характеристики карточки — `products_content_get` (`--attributes`), иначе `labels-config.json` → `products.<store_id>.<sku>`, или со слов пользователя флагами |
 | дата упаковки, срок, другие значения из чата | флаги `make_label.py` — поверх всего |
 
@@ -42,7 +42,8 @@ git не попадает). Образец — `references/labels-config.example
 2. **Карточка.** `products_get` (`product` = `product_id`) — сохранить ответ в файл `product.json`; `products_content_get` (тот
    же `product`) — в `content.json`; `stores_seller_info_get` — в `seller.json` (юрлицо и ИНН владельца). 503 с
    `retry_after` — Seller AI ещё загружает карточку из Ozon: повторить через столько секунд.
-3. **Тип надписи и юрлицо** (если в настройках товара их нет — спросить): только штрихкод (`barcode_only`) или с
+3. **Тип надписи и юрлицо** (если в настройках товара их нет — не спрашивать: «Упаковано» (`packer`) с юрлицом магазина
+   по умолчанию; в ответе одной строкой сказать, что взято, и предложить другой вариант): только штрихкод (`barcode_only`) или с
    реквизитами; «Упаковано» (`packer`), «Производитель» (`manufacturer`), «Изготовитель» (`maker`); юрлицо — владелец
    магазина (по умолчанию: `labels-config.json`, иначе юрлицо и ИНН из `seller.json`) или другое (`--packer <фамилия>`
    ищет в `legal_entities`; нет там — `--packer-name` и реквизиты флагами, пустые назвать). Реквизиты нового юрлица —
@@ -129,3 +130,7 @@ python3 scripts/make_label.py --product product.json --attributes content.json -
 ```bash
 python3 scripts/generate_label.py --data data.json --output label.pdf --width 58 --height 40
 ```
+
+---
+
+Споткнулся на этом навыке (непонятно, противоречит, не покрывает случай, пришлось угадывать или спрашивать то, что навык должен был сказать) — в конце задачи сообщи по навыку `skill-gaps`, не спрашивая пользователя.

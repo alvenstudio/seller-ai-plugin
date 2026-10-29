@@ -183,13 +183,15 @@ description: "Создание заявки на поставку FBO (муль�
   `status` (`urgent` — запаса с путём < 28 дней, `soon` — < 56), `recommended_supply`, `cluster.id`. `ads: null` —
   аналитика Ozon не загружена: так и сказать, не нуль.
 - **Товар на точке отгрузки не виден** ни в остатках, ни в `in_transit` (проверено): поэтому «уже отгружено» считать по
-  заявкам — `supplies_items_list` с `sku` и `active=true`, все страницы (кластер — в каждой строке: `cluster_id`,
-  `cluster_name`), затем `python3 scripts/supply_plan.py pending <файл>` (`{"mode", "items": [строки]}`): корзины
+  заявкам — `supplies_items_list` с `sku`, `supply_states=ACCEPTED_AT_SUPPLY_WAREHOUSE,IN_TRANSIT,ACCEPTANCE_AT_STORAGE_WAREHOUSE`
+  (для `mode: all` — ещё `READY_TO_SUPPLY,DATA_FILLING`) и `limit=100`, все страницы по `offset` (без фильтра статуса у
+  крупного товара ответ — сотни килобайт; кластер — в каждой строке: `cluster_id`, `cluster_name`). Страницы — в файл, не
+  пересказывать построчно, затем `python3 scripts/supply_plan.py pending <файл>` (`{"mode", "items": [строки]}`): корзины
   `at_dropoff`, `in_transit`, `at_warehouse`, `submitted`. По умолчанию (`mode: shipped`) вычитаются первые три;
   `mode: all` — ещё и поданные, но не отгруженные (по просьбе). Своё и Ozon не смешивать: в `pending` — своё,
   `in_transit` Ozon тогда не прибавлять. `unknown_cluster_units` больше 0 — у строк нет кластера: сказать, сколько штук.
 - **Кластеры плана — все кластеры Ozon**, а не только те, где у товара есть строки: полный список — `supplies_clusters_list`
-  (`cluster_id`, `name`). Строки `supplies_planning_availability` есть только там, где у SKU есть аналитика остатков
+  (`cluster_id`, `name`; ответ большой — со складами каждого кластера: взять только эти два поля). Строки `supplies_planning_availability` есть только там, где у SKU есть аналитика остатков
   (`filters.clusters` — кластеры со строками магазина), поэтому их присоединить к списку по `cluster.id`, а кластеру без
   строки дать `ads: 0` и остаток 0 — метод плана сам решит, сколько ему (доля рынка или минимум). Кто не примет — скажет
   расчёт (шаг 4). СНГ (Алматы, Астана, Беларусь, Армения, Узбекистан) включены, убрать — только если пользователь везёт
@@ -241,7 +243,10 @@ python3 scripts/supply_plan.py plan plan_input.json
    коробок в кластер; `single_unit` — 1 шт., такие заявки Ozon отменял сразу после создания). Ошибки тела — 422 с
    `items[].code` (`unknown_cluster`, `sku_not_in_catalog`, `duplicate_sku`, `quantity_out_of_range`, `too_many_clusters`).
 2. `supplies_drafts_calculate` с `body: {revision}`. 202 или `calculation.status` `creating`, `in_progress`, `reading` —
-   опрашивать `supplies_drafts_get` раз в 10–20 секунд до `success`, `failed`, `error` — после 429 Ozon Seller AI сам
+   опрашивать `supplies_drafts_get` раз в 10–20 секунд до `success`, `failed`, `error`. Сам `supplies_drafts_calculate`
+   может ответить 429 `rate_limited` (`retry_after`): квота Ozon — 2 расчёта в минуту на аккаунт, повторять только после
+   `retry_after`; несколько черновиков считать по очереди, следующий — через 30 секунд после предыдущего. После 429 Ozon
+   на чтениях расчёта Seller AI сам
    ждёт и читает тот же черновик Ozon, расчёт может идти несколько минут. Расчёт `error` с `timeout` или
    `upstream_error` сразу не повторять: подождать минуту и перечитать черновик (`supplies_drafts_get`) — новый расчёт
    создаёт новый черновик Ozon и тратит квоту (2 в минуту), которая и мешала. `outcome_unknown` — невидимый черновик
@@ -414,3 +419,7 @@ python3 scripts/supply_plan.py plan plan_input.json
 Дополнительно: [references/distribution.md](references/distribution.md) — методы и доли рынка;
 [references/errors.md](references/errors.md) — причины и коды; [references/pitfalls.md](references/pitfalls.md) —
 проверенные на бою грабли.
+
+---
+
+Споткнулся на этом навыке (непонятно, противоречит, не покрывает случай, пришлось угадывать или спрашивать то, что навык должен был сказать) — в конце задачи сообщи по навыку `skill-gaps`, не спрашивая пользователя.
