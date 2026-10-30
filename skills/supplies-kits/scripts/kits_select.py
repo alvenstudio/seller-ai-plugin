@@ -6,7 +6,8 @@
     python3 kits_select.py select  in.json  # {"rows": [...], "target": 6000 | "targets": [6000, 3000],
                                             #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
     python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
-                                            #  "exclude_supply_ids": [...]} → по поставке на нуждающийся кластер
+                                            #  "exclude_supply_ids": [...], "total": 1128 | null}
+                                            #  → по поставке на нуждающийся кластер, не больше total
 
 Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора: точная сумма →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
@@ -201,11 +202,17 @@ def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000
     raise KitError(f"Непересекающихся комплектов на {targets} нет ни в каком порядке: {last}")
 
 
-def by_need(rows, need, exclude=()):
+def by_need(rows, need, exclude=(), total=None):
     """На каждый нуждающийся кластер — одна целая поставка: наименьшая не меньше потребности, иначе наибольшая
-    (наименьший недобор); перебор — в днях запаса по ADS. Кластеры без поставок — остаток новой заявкой."""
+    (наименьший недобор); перебор — в днях запаса по ADS. Кластеры без поставок — остаток новой заявкой.
+
+    `total` — общий объём, который назвал пользователь («ровно 1128»): поставка, которая вывела бы взятое за него, не
+    берётся (кластер — в `over_total`, его потребность — новой заявкой), а `left_for_new_order` — ровно total − взятое.
+    Без `total` каждый кластер берёт свою поставку целиком, и взятое вместе с остатком бывает больше потребности."""
     free = _free_rows(rows, exclude)
-    used, out, missing = set(), [], []
+    used, out, missing, over_total = set(), [], [], []
+    budget = None if total is None else int(total)
+    taken = 0
     for n in need:
         cid = str(n.get("cluster_id") or n.get("id") or "")
         raw = n.get("need", n.get("quantity", n.get("recommended_supply")))
@@ -216,18 +223,27 @@ def by_need(rows, need, exclude=()):
         if not cand:
             missing.append({"cluster_id": cid, "name": n.get("name"), "need": want})
             continue
+        if budget is not None:
+            cand = [r for r in cand if taken + int(r["quantity"]) <= budget]
+            if not cand:
+                over_total.append({"cluster_id": cid, "name": n.get("name"), "need": want})
+                continue
         enough = [r for r in cand if int(r["quantity"]) >= want]
         pick = (min(enough, key=lambda r: (int(r["quantity"]), not r.get("started"), str(r["supply_id"]))) if enough
                 else max(cand, key=lambda r: (int(r["quantity"]), r.get("started"), str(r["supply_id"]))))
         used.add(str(pick["supply_id"]))
         qty, ads = int(pick["quantity"]), float(n.get("ads") or 0)
+        taken += qty
         out.append({"cluster_id": cid, "name": n.get("name") or pick.get("cluster"), "need": want, "supply": pick,
                     "quantity": qty, "over": max(0, qty - want), "short": max(0, want - qty),
                     "over_days": round((qty - want) / ads, 1) if ads > 0 and qty > want else None})
-    return {"clusters": out, "missing": missing, "taken_units": sum(c["quantity"] for c in out),
-            "need_units": sum(c["need"] for c in out) + sum(m["need"] for m in missing),
-            "left_for_new_order": sum(c["short"] for c in out) + sum(m["need"] for m in missing),
-            "orders": sorted({c["supply"]["order_id"] for c in out})}
+    result = {"clusters": out, "missing": missing, "taken_units": taken,
+              "need_units": sum(c["need"] for c in out) + sum(m["need"] for m in missing + over_total),
+              "left_for_new_order": sum(c["short"] for c in out) + sum(m["need"] for m in missing),
+              "orders": sorted({c["supply"]["order_id"] for c in out})}
+    if budget is not None:
+        result.update({"total": budget, "over_total": over_total, "left_for_new_order": max(0, budget - taken)})
+    return result
 
 
 def main():
@@ -240,7 +256,7 @@ def main():
         if a.command == "rows":
             r = rows_from_orders(d["orders"], d["sku"], d.get("now"), d.get("dropoff_ids"))
         elif a.command == "by_need":
-            r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or ())
+            r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or (), d.get("total"))
         elif d.get("targets"):
             r = select_many(d["rows"], d["targets"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
                             int(d.get("node_limit", 300000)))
