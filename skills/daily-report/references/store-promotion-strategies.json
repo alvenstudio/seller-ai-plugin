@@ -1,5 +1,5 @@
 {
-  "_comment": "Пороги аналитики ставок. default_strategy — для всех магазинов. В этом файле плагина stores и lessons пустые: переопределения по store_id Seller AI и подтверждённые пользователем правила — в его собственной копии файла вне плагина (её передают в --strategy). Скрипты файл только читают.",
+  "_comment": "Пороги аналитики ставок навыка daily-report. default_strategy — для всех магазинов. Свои пороги магазина — в копии файла у пользователя, вне плагина: stores.<store_id> поверх default_strategy; копию передают в --strategy вместе с --store-id. Скрипт берёт отсюда target_band, остальное читает агент.",
   "default_strategy": {
     "target_band": {
       "below": -2.0,
@@ -9,9 +9,7 @@
     "cpc_step_down_pct": 12,
     "cpc_step_up_cap_pct": 20,
     "cpc_step_down_cap_pct": 25,
-    "min_spend_for_action_rub": 300,
-    "guardrail_total_drr_over_target_pct": 2.0
+    "min_spend_for_action_rub": 300
   },
-  "stores": {},
-  "lessons": []
+  "stores": {}
 }
