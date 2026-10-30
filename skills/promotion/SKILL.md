@@ -99,7 +99,8 @@ description: "Реклама Ozon через Seller AI: кампании «Оп�
   нельзя: его закрывают биддер и проверки.
 - Товар — `bidder` в `promotion_campaign_products_list`: цель в силе `target_total_drr` и её источник `target_source`
   (`manual`, `plan`, `ramp`); `learning` — после смены цели 4 устоявшихся дня, пока их меньше, ставка не меняется;
-  `status: external` — ставку меняли мимо биддера, он вернёт свою; `aim` — во что ставка целится сегодня.
+  `status: external` — ставку меняли мимо биддера, он вернёт свою; `aim` — во что ставка целится сегодня; `guarantee` —
+  «Гарантированный расход» (`state`, за сегодня `today.spent`/`left`, `binds` — ставку сейчас ведёт гарантия).
 - «Почему так решил» — `promotion_campaign_products_bidder_get` (`campaign`, `sku`, `limit`): решения новыми первыми,
   `bid_before` → `bid_after`, `apply_status` (`shadow` — тестовый режим), `reason` — готовая фраза, `explanation` — числа.
   Пересказывать `reason` и ключевые числа, своё не придумывать.
@@ -125,12 +126,16 @@ description: "Реклама Ozon через Seller AI: кампании «Оп�
 
 **Настройки биддера** (данные Seller AI, Ozon не вызывается, ответ сразу):
 
-- Цель — `promotion_campaign_products_targets_set`, по товару в `items[]` одно из трёх:
+- Цель — `promotion_campaign_products_targets_set`, по товару в `items[]` одно из четырёх:
   - `{sku, target_total_drr, expected_target_total_drr}` — своя цель (проценты, один знак после запятой);
   - `{sku, plan: true}` — «ДРР из плановой юнит-экономики»: цель = «ДРР» плана карточки; ДРР плана не задан, 0 или меньше
     1 % — остаётся своя цель (`plan.usable: false`); `plan: false` — выключить;
   - `{sku, ramp: {units, target_total_drr}}` — «Разгон»: следующие N штук заказов по X %, потом обычная цель; `ramp: null`
-    снимает.
+    снимает;
+  - `{sku, guarantee: {daily, from, to}}` — «Гарантированный расход»: не меньше `daily` ₽ в день с `from` по `to` (даты МСК,
+    до 92 дней) даже без продаж — биддер поднимает ставку, пока не появятся показы и клики; если цель позволяет больше —
+    тратит по цели; расход сверх цели в эти дни не становится долгом; `guarantee: null` снимает. Только владелец или
+    администратор. Это трата денег мимо ДРР: назвать сумму в день и даты и ждать «да».
 - «ДРР из плана» в кампании Ozon «Целевой расход» — `promotion_campaign_products_plan_targets_set` (`items[{sku, enabled}]`):
   биддер держит «Целевой ДРР» товара в Ozon равным плану (вне 5–100 % не отправляет, `state: unusable`).
 - Тестовый режим — `promotion_campaigns_automation_set` (`execution_enabled`): владелец или администратор.
