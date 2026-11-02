@@ -44,6 +44,10 @@ description: "Сколько стоила услуга Ozon (досрочная 
 
 ## Шаги
 
+Только общий итог всех магазинов (без разбивки по магазинам) — один вызов `combined_economics_profit_get` (`stores` — все ID из
+`stores_list`, `group=month`, `scheme=all`): `series[].types` — суммы магазинов, `stores` — кто не посчитан и почему. Таблица по
+магазинам — шаги ниже.
+
 1. Магазины — все или названные пользователем.
 2. По каждому — `stores_history_months_get` (`feature=store_economy`): `bounds.from` — первый день начислений в Seller AI, `months[]` —
    `ready` или `loading`. «За всё время» — с `bounds.from` (не раньше 2022-01-01). Назвать месяц первых данных: иначе неясно, 0 — это
