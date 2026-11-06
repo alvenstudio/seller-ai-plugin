@@ -46,8 +46,10 @@ def _slot_key(v):
 
 
 def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
-    """Кандидаты и причины отказа по каждой поставке: Super-заявка, поставка READY_TO_SUPPLY, один SKU, места заполнены,
-    точка отгрузки — из `dropoff_ids` (откуда пользователь везёт), если они заданы."""
+    """Кандидаты и причины отказа по каждой поставке: Super-заявка, поставка READY_TO_SUPPLY или DATA_FILLING (владелец
+    06.11.2026: чего у заявки не хватает — слота, водителя и машины — заполняют и берут: `needs_timeslot`,
+    `needs_vehicle`; null — водитель ещё не прочитан), один SKU, места заполнены, точка отгрузки — из `dropoff_ids`
+    (откуда пользователь везёт), если они заданы."""
     sku, now_ts = str(sku), _ts(now) if now else None
     points = {str(x) for x in dropoff_ids} if dropoff_ids else None
     rows, rejected = [], []
@@ -65,6 +67,9 @@ def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
         started = any(s.get("state") in SHIPPED for s in supplies)
         slot = o.get("timeslot") or {}
         dropoff = o.get("dropoff") or {}
+        vehicle = o.get("vehicle") or {}
+        needs_vehicle = (None if vehicle.get("required") is None
+                         else bool(vehicle["required"]) and not (vehicle.get("number") and vehicle.get("driver_name")))
         for s in supplies:
             sid = str(s["supply_id"])
             base = {"order_id": oid, "order_number": o.get("order_number"), "supply_id": sid,
@@ -74,7 +79,7 @@ def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
                 why = "заявка без метки Super"
             elif points is not None and str(dropoff.get("id")) not in points:
                 why = f"другая точка отгрузки: {dropoff.get('name') or dropoff.get('id')}"
-            elif s.get("state") != "READY_TO_SUPPLY":
+            elif s.get("state") not in ("READY_TO_SUPPLY", "DATA_FILLING"):
                 why = f"поставка {s.get('state')}"
             elif set(comp.get(sid, {})) != {sku}:
                 why = "в поставке другой или смешанный товар" if comp.get(sid) else "состав не прочитан"
@@ -91,7 +96,9 @@ def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
                 continue
             sizes = sorted({sum(int(i["quantity"]) for i in c["items"]) for c in cargo[sid]})
             rows.append(dict(base, quantity=comp[sid][sku], cargo_ids=sorted(str(c["cargo_id"]) for c in cargo[sid]),
-                             units_per_place=sizes, started=started, timeslot_from=slot.get("from"),
+                             units_per_place=sizes, started=started, needs_timeslot=not slot.get("from"),
+                             needs_vehicle=needs_vehicle,
+                             timeslot_from=slot.get("from"),
                              timeslot_local=slot.get("local_from"), dropoff=dropoff.get("name"),
                              dropoff_id=None if dropoff.get("id") is None else str(dropoff["id"])))
     return {"rows": rows, "rejected": rejected}
