@@ -6,21 +6,25 @@
     python3 kits_select.py select  in.json  # {"rows": [...], "target": 6000 | "targets": [6000, 3000],
                                             #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
     python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
-                                            #  "exclude_supply_ids": [...], "total": 1128 | null}
-                                            #  → по поставке на нуждающийся кластер, не больше total;
-                                            #  в кластере с поставкой начатой заявки — только из начатых
+                                            #  "exclude_supply_ids": [...], "total": 1128 | null, "node_limit": 1000000}
+                                            #  → по поставке на нуждающийся кластер: больше покрыто (ровно total —
+                                            #  лучше всего) → больше штук начатых → меньше заявок; остаток новой
+                                            #  заявки — только в кластеры с продажами
 
-Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора: точная сумма →
+Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора `select`: точная сумма →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
 заявок → меньше поставок → при равенстве — поставки с более ранним слотом (без слота — последними). «Начатая»
 заявка — та, часть поставок которой уже отгружена или уже взята в комплекты
 (`exclude_supply_ids`), а часть ещё ждёт. Несколько объёмов (`targets`) — непересекающиеся комплекты: поставки
-первого не входят во второй, а их заявки для второго — начатые.
+первого не входят во второй, а их заявки для второго — начатые. Приоритеты `by_need` — в его описании; перебор у
+обоих один (`_search`).
 """
 import argparse
 import itertools
 import json
+import math
 import sys
+from collections import namedtuple
 from datetime import datetime, timezone
 
 SHIPPED = {"ACCEPTED_AT_SUPPLY_WAREHOUSE", "IN_TRANSIT", "ACCEPTANCE_AT_STORAGE_WAREHOUSE",
@@ -113,6 +117,65 @@ def _free_rows(rows, exclude):
             for r in rows if str(r["supply_id"]) not in excl and int(r["quantity"]) > 0]
 
 
+def _search(groups, score, target=None, prune=None, arrange=None, node_limit=300000):
+    """Перебор с пределом шагов — общий для `select` и `by_need`.
+
+    `groups` — по группе список вариантов (штук, элемент, ключ): из группы берётся не больше одного, два варианта с
+    одним ключом (не None) вместе не берутся. `target` — точная сумма штук (недостижимые суммы отсекают битовые маски),
+    None — набор любой суммы, лист — после последней группы. `score(chosen)` — кортеж, больше — лучше, при равенстве
+    остаётся найденный первым. `prune(g, chosen, remaining, best_score)` → True отсекает ветку. `arrange(g, варианты,
+    chosen, remaining, best_score)` — варианты группы по порядку, None среди них — «из группы ничего»; без `arrange` —
+    все варианты, затем «ничего». → (лучший набор элементов или None, его оценка, шагов: 0 — `target` недостижим; больше
+    `node_limit` — перебор оборван, оптимум не доказан)."""
+    n = len(groups)
+    reach = None
+    if target is not None:
+        mask = (1 << (target + 1)) - 1
+        reach = [0] * (n + 1)
+        reach[n] = 1
+        for g in range(n - 1, -1, -1):  # суммы, достижимые группами g… (биты), чтобы не ходить в тупики
+            r = reach[g + 1]
+            for q, _, _ in groups[g]:
+                r |= reach[g + 1] << q
+            reach[g] = r & mask
+        if not (reach[0] >> target) & 1:
+            return None, None, 0
+    best, best_score, nodes, chosen, used = None, None, 0, [], {}
+
+    def dfs(g, remaining):
+        nonlocal best, best_score, nodes
+        nodes += 1
+        if nodes > node_limit:
+            return
+        if (remaining == 0) if target is not None else (g == n):
+            s = score(chosen)
+            if best_score is None or s > best_score:
+                best, best_score = list(chosen), s
+            return
+        if g == n or (reach is not None and not (reach[g] >> remaining) & 1):
+            return
+        if prune is not None and prune(g, chosen, remaining, best_score):
+            return
+        for opt in (groups[g] + [None]) if arrange is None else arrange(g, groups[g], chosen, remaining, best_score):
+            if opt is None:
+                dfs(g + 1, remaining)
+                continue
+            q, item, key = opt
+            if (target is not None and q > remaining) or (key is not None and used.get(key)):
+                continue
+            chosen.append(item)
+            if key is not None:
+                used[key] = used.get(key, 0) + 1
+            dfs(g + 1, remaining - q if target is not None else remaining)
+            if key is not None:
+                used[key] -= 1
+            chosen.pop()
+
+    sys.setrecursionlimit(max(1000, 4 * n + 100))
+    dfs(0, 0 if target is None else target)
+    return best, best_score, nodes
+
+
 def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
     if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
         raise KitError("Нужно целое количество больше нуля")
@@ -123,13 +186,7 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
     rows.sort(key=lambda r: (not r.get("started"), _slot_key(r.get("timeslot_from")), str(r["order_id"]),
                              -int(r["quantity"]), str(r["supply_id"])))
     q = [int(r["quantity"]) for r in rows]
-    n, mask = len(rows), (1 << (target + 1)) - 1
-    reach = [0] * (n + 1)
-    reach[n] = 1
-    for i in range(n - 1, -1, -1):  # суммы, достижимые поставками i… (биты), чтобы не ходить в тупики
-        reach[i] = (reach[i + 1] | (reach[i + 1] << q[i])) & mask
-    if not (reach[0] >> target) & 1:
-        raise KitError(f"Точной комбинации целых поставок на {target} шт нет")
+    n = len(rows)
     started_orders = {}
     for i, r in enumerate(rows):
         if r.get("started"):
@@ -143,38 +200,21 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
         new_orders = len({rows[i]["order_id"] for i in chosen if not rows[i].get("started")})
         return (completed, units_started, clusters, -new_orders, -len(chosen), -sum(chosen))
 
-    best, best_score, nodes, chosen, used_clusters = None, None, 0, [], {}
     started_left = [0] * (n + 1)
     for i in range(n - 1, -1, -1):
         started_left[i] = started_left[i + 1] + (q[i] if rows[i].get("started") else 0)
 
-    def dfs(i, remaining):
-        nonlocal best, best_score, nodes
-        nodes += 1
-        if nodes > node_limit:
-            return
-        if remaining == 0:
-            s = score(chosen)
-            if best_score is None or s > best_score:
-                best, best_score = list(chosen), s
-            return
-        if i == n or not (reach[i] >> remaining) & 1:
-            return
-        if best_score is not None and best_score[0] == len(started_orders):
-            done = sum(q[k] for k in chosen if rows[k].get("started"))
-            if done + min(remaining, started_left[i]) < best_score[1]:
-                return
-        c = rows[i]["cluster_id"]
-        if q[i] <= remaining and (allow_repeats or not used_clusters.get(c)):
-            chosen.append(i)
-            used_clusters[c] = used_clusters.get(c, 0) + 1
-            dfs(i + 1, remaining - q[i])
-            used_clusters[c] -= 1
-            chosen.pop()
-        dfs(i + 1, remaining)
+    def prune(i, chosen, remaining, best_score):  # все начатые взяты до конца — штук начатых больше не набрать
+        if best_score is None or best_score[0] != len(started_orders):
+            return False
+        done = sum(q[k] for k in chosen if rows[k].get("started"))
+        return done + min(remaining, started_left[i]) < best_score[1]
 
-    sys.setrecursionlimit(max(1000, 4 * n + 100))
-    dfs(0, target)
+    # Группа — одна поставка; без повторов ключ — кластер.
+    groups = [[(q[i], i, None if allow_repeats else rows[i]["cluster_id"])] for i in range(n)]
+    best, _, nodes = _search(groups, score, target, prune, node_limit=node_limit)
+    if not nodes:
+        raise KitError(f"Точной комбинации целых поставок на {target} шт нет")
     if best is None:
         raise KitError(f"Точной комбинации на {target} шт без повторов кластеров нет" if not allow_repeats
                        else f"Точной комбинации на {target} шт не найдено за {node_limit} шагов")
@@ -210,77 +250,273 @@ def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000
     raise KitError(f"Непересекающихся комплектов на {targets} нет ни в каком порядке: {last}")
 
 
-def _pick_for_need(cand, want):
-    """Наименьшая поставка не меньше потребности, иначе наибольшая (наименьший недобор); при равенстве — более ранний
-    слот."""
-    enough = [r for r in cand if int(r["quantity"]) >= want]
-    if enough:
-        return min(enough, key=lambda r: (int(r["quantity"]), _slot_key(r.get("timeslot_from")), str(r["supply_id"])))
-    return max(cand, key=lambda r: (int(r["quantity"]), -_slot_key(r.get("timeslot_from")).timestamp(),
-                                    str(r["supply_id"])))
+# Вариант поставки в кластере для `by_need`: q — штук; st — штук начатой заявки (q или 0); order — заявка; units —
+# перебор сверх потребности в кластере без продаж (штук); days — перебор в днях запаса по ADS, ×10⁶ (целые — суммы
+# точные); cov — покрытая потребность кластера; gi — номер кластера в переборе; row — строка-кандидат.
+_Opt = namedtuple("_Opt", "q st order units days cov gi row")
 
 
-def by_need(rows, need, exclude=(), total=None):
-    """На каждый нуждающийся кластер — одна целая поставка; перебор — в днях запаса по ADS. Кластеры без поставок —
-    остаток новой заявкой.
+def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
+    """По одной целой поставке на нуждающийся кластер; что не покрыто готовыми поставками — остаток новой заявкой.
 
-    Начатые заявки — первыми (владелец, 08.11.2026): слот частично отгруженной заявки уже не перенести, и её
-    неотгруженные поставки просрочатся, если их не взять, а слот свежей заявки переносится. Поэтому в кластере, где есть
-    поставка начатой заявки, выбор идёт только среди начатых (наименьшая не меньше потребности, иначе наибольшая —
-    недобор новой заявкой); свежие — только где начатых нет. Кластеры с начатыми разбираются раньше остальных, по
-    раннему слоту: при `total` бюджет достаётся им первым. `started_leftovers_not_taken` — поставки начатых заявок,
-    оставшиеся невзятыми (их слот не перенести — назвать пользователю).
+    Владелец, 08.11.2026: «Давай приоритетно брать такие поставки, чтобы потребность максимально покрыть. Лучше будет
+    если суперами покроем потребность, чем новые заявки подавать. Новые заявки хуже того если мы не будем брать
+    сгорающие поставки.» Поэтому подборы сравниваются по порядку:
+    1. больше покрыто готовыми поставками — меньше `left_for_new_order`: с `total` взятое не больше него и ровно
+       `total` — лучше всего (`exact`); без `total` — в каждом кластере больше покрытой потребности;
+    2. затем больше штук начатых заявок: слот частично отгруженной заявки не перенести, её невзятые поставки сгорят;
+    3. затем меньше заявок (слотов) — лучше одна; затем меньше перебора сверх потребности (сначала штуки в кластерах
+       без продаж, затем дни запаса по ADS); затем более ранние слоты.
+    Перебор — общий с `select` (`_search`): точная сумма по битовым маскам, границы по каждому критерию, предел
+    `node_limit` шагов. Покрытие и штуки начатых считаются точно до перебора, и любой найденный подбор их держит;
+    оборван перебор — `proven: false`: не доказано лишь, что меньше заявок, перебора и раньше слоты не найти.
 
-    `total` — общий объём, который назвал пользователь («ровно 1128»): поставка, которая вывела бы взятое за него, не
-    берётся (кластер — в `over_total`, его потребность — новой заявкой), а `left_for_new_order` — ровно total − взятое.
-    Без `total` каждый кластер берёт свою поставку целиком, и взятое вместе с остатком бывает больше потребности."""
+    `total` — общий объём, который назвал пользователь («ровно 1128»): взятое + `left_for_new_order` = total, кластер
+    с поставками, не вошедшими в подбор, — в `over_total`. Без `total` каждый кластер берёт поставку целиком, и взятое
+    бывает больше потребности. Остаток новой заявки (`new_order`) — только в кластеры потребности с продажами
+    (`ads` > 0): по непокрытой потребности, больший — первым; излишек сверх неё при `total` — в кластер с наибольшим
+    ADS. Непокрытое там, где продаж нет, — `no_sales`, новой заявке не отдаётся. `ads` не передан ни одному кластеру —
+    продаж не проверить: `sales_checked: false`, остаток — по непокрытой потребности всех кластеров.
+    `started_leftovers_not_taken` — невзятые поставки начатых заявок (назвать пользователю)."""
     free = _free_rows(rows, exclude)
     budget = None if total is None else int(total)
-    wants = []
+    if budget is not None and budget < 0:
+        raise KitError("total — целое число не меньше нуля")
+    wants, seen = [], {}
     for idx, n in enumerate(need):
         cid = str(n.get("cluster_id") or n.get("id") or "")
         raw = n.get("need", n.get("quantity", n.get("recommended_supply")))
         want = int(raw or 0)
-        if cid and want > 0:
-            wants.append((idx, cid, want, n))
-
-    def urgency(w):
-        slots = [_slot_key(r.get("timeslot_from")) for r in free if str(r["cluster_id"]) == w[1] and r.get("started")]
-        return (not slots, min(slots) if slots else _LAST, w[0])
-
-    used, picked, missing, over_total = set(), [], [], []
-    taken = 0
-    for idx, cid, want, n in sorted(wants, key=urgency):
-        cand = [r for r in free if str(r["cluster_id"]) == cid and str(r["supply_id"]) not in used]
-        if not cand:
-            missing.append((idx, {"cluster_id": cid, "name": n.get("name"), "need": want}))
+        if not cid or want <= 0:
             continue
-        if budget is not None:
-            cand = [r for r in cand if taken + int(r["quantity"]) <= budget]
-            if not cand:
-                over_total.append((idx, {"cluster_id": cid, "name": n.get("name"), "need": want}))
-                continue
-        pick = _pick_for_need([r for r in cand if r.get("started")] or cand, want)
-        used.add(str(pick["supply_id"]))
-        qty, ads = int(pick["quantity"]), float(n.get("ads") or 0)
-        taken += qty
-        picked.append((idx, {"cluster_id": cid, "name": n.get("name") or pick.get("cluster"), "need": want,
-                             "supply": pick, "quantity": qty, "over": max(0, qty - want),
-                             "short": max(0, want - qty),
-                             "over_days": round((qty - want) / ads, 1) if ads > 0 and qty > want else None}))
-    out = [c for _, c in sorted(picked, key=lambda x: x[0])]
-    missing = [m for _, m in sorted(missing, key=lambda x: x[0])]
-    over_total = [m for _, m in sorted(over_total, key=lambda x: x[0])]
+        if cid in seen:  # кластер назван дважды — одна потребность
+            seen[cid]["need"] += want
+            continue
+        ads = n.get("ads")
+        seen[cid] = {"idx": idx, "cluster_id": cid, "name": n.get("name"), "need": want,
+                     "ads": None if ads is None else float(ads)}
+        wants.append(seen[cid])
+    cand = {}
+    for r in free:
+        cand.setdefault(str(r["cluster_id"]), []).append(r)
+    groups = [w for w in wants if cand.get(w["cluster_id"])]
+    slot_rank = {k: i for i, k in enumerate(sorted({_slot_key(r.get("timeslot_from")) for r in free}))}
+    order_rank, spread = {}, {}  # место слота заявки (раньше — меньше); в скольких кластерах у заявки есть поставка
+    for w in groups:
+        for r in cand[w["cluster_id"]]:
+            o = str(r["order_id"])
+            order_rank[o] = min(order_rank.get(o, len(slot_rank)), slot_rank[_slot_key(r.get("timeslot_from"))])
+        for o in {str(r["order_id"]) for r in cand[w["cluster_id"]]}:
+            spread[o] = spread.get(o, 0) + 1
+    opts = []
+    for gi, w in enumerate(groups):
+        sells = (w["ads"] or 0) > 0
+        o = []
+        for r in cand[w["cluster_id"]]:
+            q = int(r["quantity"])
+            over = max(0, q - w["need"])
+            o.append(_Opt(q, q if r.get("started") else 0, str(r["order_id"]), 0 if sells else over,
+                          round(over * 1e6 / w["ads"]) if sells else 0, min(q, w["need"]), gi, r))
+        if budget is None:  # без total кластеры не связаны: в каждом — больше покрытия, затем больше штук начатых
+            top = max(x.cov for x in o)
+            o = [x for x in o if x.cov == top]
+            top = max(x.st for x in o)
+            o = [x for x in o if x.st == top]
+        o.sort(key=lambda x: (-x.st, -spread[x.order], x.units, x.days, order_rank[x.order], x.order,
+                              str(x.row["supply_id"])))
+        opts.append(o)
+    # Перебор — с кластеров, где выбрать заявку не из чего (меньше разных заявок): раньше видно, сколько их нужно.
+    seq = sorted(range(len(groups)), key=lambda i: (len({x.order for x in opts[i]}), groups[i]["idx"]))
+    groups, opts = [groups[i] for i in seq], [[x._replace(gi=g) for x in opts[i]] for g, i in enumerate(seq)]
+    n = len(groups)
+
+    def ranks(orders):
+        return sum(order_rank[o] for o in orders)
+
+    def score(chosen):
+        orders = {x.order for x in chosen}
+        return (sum(x.cov if budget is None else x.q for x in chosen), sum(x.st for x in chosen), -len(orders),
+                -sum(x.units for x in chosen), -sum(x.days for x in chosen), -ranks(orders))
+
+    def split(options, chosen, best_score):  # сначала поставки уже взятых заявок; новые — пока заявок меньше лучшего
+        orders = {x.order for x in chosen}
+        cap = None if best_score is None else -best_score[2]
+        same = [t for t in options if t[1].order in orders]
+        other = [] if cap is not None and len(orders) >= cap else [t for t in options if t[1].order not in orders]
+        return same, other
+
+    if budget is not None:
+        reach, mask = 1, (1 << (budget + 1)) - 1
+        for o in opts:
+            r = reach
+            for q in {x.q for x in o}:
+                r |= reach << q
+            reach = r & mask
+        target, step = reach.bit_length() - 1, 0  # больше всего штук, не больше total
+        for o in opts:
+            for x in o:
+                step = math.gcd(step, x.q)
+        step, mask = step or 1, (1 << (target + 1)) - 1
+        top = target // step
+        # dp[g][s] — по кластерам g… ровно s·step штук: (больше штук начатых, меньше перебора без продаж, меньше дней
+        # перебора), каждое — отдельная граница; None — такой суммы не набрать.
+        dp = [None] * (n + 1)
+        dp[n] = [(0, 0, 0)] + [None] * top
+        for g in range(n - 1, -1, -1):
+            nxt, cur = dp[g + 1], list(dp[g + 1])
+            for x in opts[g]:
+                k = x.q // step
+                for s in range(k, top + 1):
+                    b = nxt[s - k]
+                    if b is not None:
+                        c, v = cur[s], (b[0] + x.st, b[1] + x.units, b[2] + x.days)
+                        cur[s] = v if c is None else (max(c[0], v[0]), min(c[1], v[1]), min(c[2], v[2]))
+            dp[g] = cur
+        best_started = dp[0][top][0]
+        sizes = [{} for _ in range(n)]  # кластер → заявка → штук в её поставках
+        for g, o in enumerate(opts):
+            for x in o:
+                sizes[g].setdefault(x.order, []).append(x.q)
+        memo = {}  # alone() в пределах этого подбора
+
+        def alone(g, orders):  # суммы кластеров g…, которые набирают поставки только этих заявок (по одной на кластер)
+            r = memo.get((g, orders))
+            if r is None:
+                r = 1
+                if g < n:
+                    nxt = r = alone(g + 1, orders)
+                    for o in orders:
+                        for q in sizes[g].get(o, ()):
+                            r |= nxt << q
+                    r &= mask
+                if len(memo) > 50000:
+                    memo.clear()
+                memo[(g, orders)] = r
+            return r
+
+        def completes(g, orders, remaining):  # взятые заявки сами наберут остаток
+            return (alone(g, frozenset(orders)) >> remaining) & 1
+
+        def fits(g, st, remaining):  # ещё можно набрать наибольшую сумму и наибольшее число штук начатых
+            b = dp[g][remaining // step]
+            return b is not None and st + b[0] >= best_started
+
+        def arrange(g, options, chosen, remaining, best_score):
+            st = sum(x.st for x in chosen)
+            same, other = split([t for t in options if t[0] <= remaining
+                                 and fits(g + 1, st + t[1].st, remaining - t[0])], chosen, best_score)
+            if other:  # новая заявка, с которой взятые наберут остаток, — первой
+                orders = {x.order for x in chosen}
+                other.sort(key=lambda t: not completes(g + 1, orders | {t[1].order}, remaining - t[0]))
+            skip = [None] if fits(g + 1, st, remaining) else []
+            return same + skip + other if chosen else other + skip
+
+        def prune(g, chosen, remaining, best_score):
+            b = dp[g][remaining // step]
+            if b is None:
+                return True
+            if best_score is None:
+                return False
+            orders = {x.order for x in chosen}
+            k = len(orders)  # заявок будет не меньше; ещё одна, если взятые заявки остаток не наберут
+            if k + 1 >= -best_score[2] and remaining and not completes(g, orders, remaining):
+                k += 1
+            return (target, best_started, -k, -sum(x.units for x in chosen) - b[1],
+                    -sum(x.days for x in chosen) - b[2], -ranks(orders)) <= best_score
+    else:
+        target = None
+        low = [(0, 0)] * (n + 1)  # наименьший перебор кластеров g…: (штук без продаж, дней)
+        for g in range(n - 1, -1, -1):
+            low[g] = (low[g + 1][0] + min(x.units for x in opts[g]), low[g + 1][1] + min(x.days for x in opts[g]))
+        group_orders = [{x.order for x in o} for o in opts]
+        order_groups = {}
+        for g, orders in enumerate(group_orders):
+            for o in orders:
+                order_groups.setdefault(o, set()).add(g)
+        best_cov, best_started = sum(o[0].cov for o in opts), sum(o[0].st for o in opts)
+
+        def uncovered(g, orders):  # кластеры g…, где у взятых заявок нет поставки
+            return {h for h in range(g, n) if not group_orders[h] & orders}
+
+        def arrange(g, options, chosen, remaining, best_score):  # каждый кластер с поставками берёт одну
+            same, other = split(options, chosen, best_score)
+            if other:  # новая заявка, что закроет больше оставшихся кластеров, — первой
+                rest = uncovered(g + 1, {x.order for x in chosen})
+                other.sort(key=lambda t: -len(order_groups[t[1].order] & rest))
+            return same + other
+
+        def prune(g, chosen, remaining, best_score):
+            if best_score is None:
+                return False
+            orders = {x.order for x in chosen}
+            k = len(orders)  # где взятых заявок нет, нужны ещё: не меньше «кластеров ÷ наибольшее, что закроет одна»
+            rest = uncovered(g, orders)
+            if rest:  # кластеры без общих заявок — каждому своя
+                apart, seen_orders = 0, set()
+                for h in sorted(rest, key=lambda h: (len(group_orders[h]), h)):
+                    if not group_orders[h] & seen_orders:
+                        apart, seen_orders = apart + 1, seen_orders | group_orders[h]
+                most = max(len(order_groups[o] & rest) for h in rest for o in group_orders[h])
+                k += max(apart, -(-len(rest) // most))
+            return (best_cov, best_started, -k, -sum(x.units for x in chosen) - low[g][0],
+                    -sum(x.days for x in chosen) - low[g][1], -ranks(orders)) <= best_score
+
+    best, _, nodes = _search([[(x.q, x, None) for x in o] for o in opts], score, target, prune, arrange, node_limit)
+    if best is None:
+        raise KitError(f"Подбор по потребности не уложился в {node_limit} шагов")
+    pick = {x.gi: x for x in best}
+    got = {groups[x.gi]["cluster_id"]: x.q for x in best}
+    out, over_total = [], []
+    for gi in sorted(range(n), key=lambda g: groups[g]["idx"]):
+        w, x = groups[gi], pick.get(gi)
+        if x is None:
+            over_total.append({"cluster_id": w["cluster_id"], "name": w["name"], "need": w["need"]})
+            continue
+        ads = w["ads"] or 0
+        out.append({"cluster_id": w["cluster_id"], "name": w["name"] or x.row.get("cluster"), "need": w["need"],
+                    "supply": x.row, "quantity": x.q, "over": max(0, x.q - w["need"]),
+                    "short": max(0, w["need"] - x.q),
+                    "over_days": round((x.q - w["need"]) / ads, 1) if ads > 0 and x.q > w["need"] else None})
+    missing = [{"cluster_id": w["cluster_id"], "name": w["name"], "need": w["need"]}
+               for w in wants if not cand.get(w["cluster_id"])]
+    taken = sum(x.q for x in best)
+    # Остаток новой заявки — только туда, где товар продаётся (без данных о продажах — везде).
+    need_left = {w["cluster_id"]: max(0, w["need"] - got.get(w["cluster_id"], 0)) for w in wants}
+    sales_checked = any(w["ads"] is not None for w in wants)
+    sells = [w for w in wants if not sales_checked or (w["ads"] or 0) > 0]
+    selling = {w["cluster_id"] for w in sells}
+    tail = {}
+    if budget is None:
+        tail = {w["cluster_id"]: need_left[w["cluster_id"]] for w in sells if need_left[w["cluster_id"]]}
+        left = sum(tail.values())
+    else:
+        left = rest = budget - taken
+        for w in sorted((w for w in sells if need_left[w["cluster_id"]]),
+                        key=lambda w: (-need_left[w["cluster_id"]], -(w["ads"] or 0), w["idx"])):
+            if not rest:
+                break
+            tail[w["cluster_id"]] = min(rest, need_left[w["cluster_id"]])
+            rest -= tail[w["cluster_id"]]
+        if rest and sells:  # продающая потребность покрыта, а штуки остались — туда, где продаж больше всего
+            top_w = max(sells, key=lambda w: ((w["ads"] or 0), -w["idx"]))
+            tail[top_w["cluster_id"]] = tail.get(top_w["cluster_id"], 0) + rest
+    new_order = [{"cluster_id": w["cluster_id"],
+                  "name": w["name"] or (cand.get(w["cluster_id"]) or [{}])[0].get("cluster"),
+                  "quantity": tail[w["cluster_id"]], "ads": w["ads"]} for w in wants if w["cluster_id"] in tail]
+    no_sales = [{"cluster_id": w["cluster_id"], "name": w["name"], "need_left": need_left[w["cluster_id"]],
+                 "ads": w["ads"]} for w in wants if w["cluster_id"] not in selling and need_left[w["cluster_id"]]]
+    used = {str(x.row["supply_id"]) for x in best}
     leftovers = sorted((r for r in free if r.get("started") and str(r["supply_id"]) not in used),
                        key=lambda r: (_slot_key(r.get("timeslot_from")), str(r["order_id"]), str(r["supply_id"])))
     result = {"clusters": out, "missing": missing, "taken_units": taken,
-              "need_units": sum(c["need"] for c in out) + sum(m["need"] for m in missing + over_total),
-              "left_for_new_order": sum(c["short"] for c in out) + sum(m["need"] for m in missing),
-              "from_started_orders": sum(c["quantity"] for c in out if c["supply"].get("started")),
-              "started_leftovers_not_taken": leftovers,
-              "orders": sorted({c["supply"]["order_id"] for c in out})}
+              "need_units": sum(w["need"] for w in wants), "left_for_new_order": left,
+              "new_order": new_order, "no_sales": no_sales, "sales_checked": sales_checked,
+              "from_started_orders": sum(x.st for x in best), "started_leftovers_not_taken": leftovers,
+              "orders": sorted({x.row["order_id"] for x in best}),
+              "slots": sorted({x.row.get("timeslot_from") for x in best}, key=lambda v: (_slot_key(v), str(v))),
+              "proven": nodes <= node_limit}
     if budget is not None:
-        result.update({"total": budget, "over_total": over_total, "left_for_new_order": max(0, budget - taken)})
+        result.update({"total": budget, "over_total": over_total, "exact": taken == budget})
     return result
 
 
@@ -294,7 +530,8 @@ def main():
         if a.command == "rows":
             r = rows_from_orders(d["orders"], d["sku"], d.get("now"), d.get("dropoff_ids"))
         elif a.command == "by_need":
-            r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or (), d.get("total"))
+            r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or (), d.get("total"),
+                        int(d.get("node_limit", 1000000)))
         elif d.get("targets"):
             r = select_many(d["rows"], d["targets"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
                             int(d.get("node_limit", 300000)))
