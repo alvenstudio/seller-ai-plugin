@@ -12,7 +12,7 @@ description: "Заказы и отправления Ozon через Seller AI, 
 
 | Вопрос | Инструмент | Главное в аргументах |
 |---|---|---|
-| Заказы всех схем одним списком с фильтрами | `orders_list` | `date_from` / `date_to` — дни МСК по дате создания; `scheme`, `status` (через запятую), `sku` или `offer_id`, `warehouse_id`; `limit` ≤ 500 |
+| Заказы всех схем одним списком с фильтрами | `orders_list` | `date_from` / `date_to` — дни МСК по дате создания; `scheme`, `status` (через запятую), `sku` или `offer_id`, `warehouse_id`; `limit` ≤ 1000 |
 | Вкладка «FBO → Заказы» | `postings_fbo_list` | `tab`, `period` или даты, `search` (артикул, название, SKU) |
 | Вкладка «FBS → Заказы» | `postings_fbs_list` | `tab` (по умолчанию `awaiting_packaging`), `warehouse_ids`, `delivery_method_ids`, `shipment_day` (`today`/`tomorrow`), `search` |
 | Одно отправление | `postings_fbo_get` / `postings_fbs_get` | `posting` — номер |

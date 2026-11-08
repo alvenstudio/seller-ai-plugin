@@ -29,7 +29,7 @@ description: "Реклама Ozon через Seller AI: кампании «Оп�
 |---|---|---|
 | Расход и ДРР за период: магазин, типы, кампании, товары | `promotion_analytics_get` (`date_from`, `date_to`, `slice=type\|campaign\|category\|product`, `types`, `skus`) | `gmv.covered: false` — общий ДРР неизвестен |
 | Кампании «Оплата за клик», карточка | `promotion_campaigns_list` (`states`, `strategies`, `placements`), `promotion_campaigns_get` | `mode`, `automation`, `facts` |
-| Товары кампании, ставки | `promotion_campaign_products_list` (все страницы, `page_size` до 200) | `bid` в ₽, у автостратегии 0 |
+| Товары кампании, ставки | `promotion_campaign_products_list` (все страницы, `page_size` до 1000) | `bid` в ₽, у автостратегии 0 |
 | «Оплата за заказ: выбранные товары» | `promotion_cpo_products_list` (`enabled`, `bid_kind=reduced\|regular`, `carrots`) | `display_bid_pct`, `fixed_bid_pct`, `reduced` (комбо) |
 | «Оплата за заказ: все товары» | `promotion_cpo_all_get` | `stats: null` — ещё грузится |
 | Списания по дням и кампаниям («Детализация расходов») | `promotion_expenses_get` (`types=cpc,cpo_selected,cpo_all`) | `missing` — дни, которых Ozon ещё не отдал |
