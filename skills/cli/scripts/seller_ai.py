@@ -2,6 +2,7 @@
 """Seller AI из терминала: клиент MCP-сервера Seller AI. Те же инструменты, права и проверки, что видит агент через MCP,
 но вызов идёт из shell или скрипта, и печатается только ответ или его часть. Когда брать его вместо MCP — SKILL.md.
 
+    python3 seller_ai.py login --code sal_…       вход по коду из подключения MCP (cli_codes_create): без браузера
     python3 seller_ai.py login [--token]          вход: браузер (OAuth, как у MCP) или токен «sai_…» со stdin
     python3 seller_ai.py status                   кто вошёл, какие магазины (токен не печатается)
     python3 seller_ai.py logout                   выйти и отозвать вход OAuth
@@ -400,7 +401,9 @@ def oauth_login(server, open_browser=True):
             "code_challenge": challenge, "code_challenge_method": "S256", "scope": "read write", "state": state,
             "resource": resource})
         threading.Thread(target=listener.serve_forever, daemon=True).start()
-        _err("Вход в Seller AI: в браузере выберите магазины и права и подтвердите. Если браузер не открылся, откройте "
+        _err("Этот вход — только для CLI. Подключён MCP Seller AI — лучше войти его кодом (cli_codes_create, затем "
+             "login --code); не подключён — подключить, иначе MCP останется без входа.\n"
+             "Вход в Seller AI: в браузере выберите магазины и права и подтвердите. Если браузер не открылся, откройте "
              "ссылку:\n" + url + "\n")
         if open_browser:
             try:
@@ -426,6 +429,40 @@ def oauth_login(server, open_browser=True):
                              "expires_at": time.time() + int(tok.get("expires_in") or 3600), "scope": tok.get("scope")})
     revoke(server, old)
     return {"signed_in": True, "server": server, "kind": "oauth", "scope": tok.get("scope")}
+
+
+CLI_CODE_GRANT = "urn:seller-ai:params:oauth:grant-type:cli-code"
+
+
+def code_login(server, code):
+    """Вход по одноразовому коду из подключения MCP (инструмент cli_codes_create): без браузера и второго согласия, с
+    магазинами и правами этого подключения. Код живёт 2 минуты и годится один раз."""
+    meta = _metadata(server)
+    if CLI_CODE_GRANT not in (meta.get("grant_types_supported") or []):
+        raise AuthError("этот сервер ещё не принимает вход по коду: войдите через браузер (login)")
+    if not re.fullmatch(r"sal_[A-Za-z0-9_\-]{16,200}", code or ""):
+        raise UsageError("--code: нужен код sal_… из cli_codes_create")
+    try:
+        import socket
+        host = socket.gethostname().split(".")[0][:40]
+    except OSError:
+        host = ""
+    resource = server + "/mcp"
+    # Обмен не повторяется: тот же код второй раз отзывает вход, который он уже мог выдать.
+    try:
+        status, tok = _post_form(meta["token_endpoint"], {"grant_type": CLI_CODE_GRANT, "code": code,
+                                                          "resource": resource, "client_name": host}, timeout=30)
+    except NetworkError as e:
+        raise NetworkError(f"{e}: код уже мог сработать — этот не повторять, получите новый (cli_codes_create)")
+    if status != 200 or not isinstance(tok.get("access_token"), str) or not isinstance(tok.get("client_id"), str):
+        reason = tok.get("error_description") or tok.get("error") or f"ответ {status}"
+        raise AuthError(f"код не принят ({reason}): получите новый — cli_codes_create — и сразу войдите им")
+    old = _remember(server, {"kind": "oauth", "client_id": tok["client_id"], "token_endpoint": meta["token_endpoint"],
+                             "resource": resource, "access_token": tok["access_token"],
+                             "refresh_token": tok.get("refresh_token"),
+                             "expires_at": time.time() + int(tok.get("expires_in") or 3600), "scope": tok.get("scope")})
+    revoke(server, old)
+    return {"signed_in": True, "server": server, "kind": "oauth", "via": "mcp_code", "scope": tok.get("scope")}
 
 
 # ---- ответ инструмента -----------------------------------------------------------------------------------------------
@@ -457,6 +494,16 @@ class Answer:
             self.body = parsed if parsed is not None else {"text": "\n".join(self.texts)}
         else:
             self.body = None
+        # Сервер кладёт предупреждения и внутрь ответа (для клиентов, что показывают модели только его). CLI печатает
+        # их в stderr, поэтому из тела они убираются — в выводе их не будет дважды.
+        if isinstance(self.body, dict) and isinstance(self.body.get("seller_ai_warnings"), list):
+            self.body = dict(self.body)
+            inside = [w for w in self.body.pop("seller_ai_warnings") if isinstance(w, dict)]
+            if not listed:
+                for w in inside:
+                    found = {"code": w.get("code"), "message": w.get("message")}
+                    if found not in self.warnings:
+                        self.warnings.append(found)
         self.message = self.texts[0] if self.texts else ""
 
 
@@ -986,7 +1033,7 @@ def select(value, expr):
 
 # ---- командная строка ------------------------------------------------------------------------------------------------
 
-FLAGS_WITH_VALUE = {"--select", "--timeout", "--out", "--server", "--run"}
+FLAGS_WITH_VALUE = {"--select", "--timeout", "--out", "--server", "--run", "--code"}
 FLAGS = {"--wait", "--yes", "--dry-run", "--raw", "--json", "--keep-going", "--token", "-h", "--help"}
 
 
@@ -1181,6 +1228,9 @@ def cmd_login(client, opts):
         Client(server=client.server, token=token).call("access_tokens_current_get")
         revoke(client.server, _remember(client.server, {"kind": "token", "access_token": token}))
         _print({"signed_in": True, "server": client.server, "kind": "token"})
+        return 0
+    if opts.get("code"):
+        _print(code_login(client.server, opts["code"].strip()))
         return 0
     _print(oauth_login(client.server))
     return 0
