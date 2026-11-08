@@ -7,7 +7,8 @@
                                             #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
     python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
                                             #  "exclude_supply_ids": [...], "total": 1128 | null}
-                                            #  → по поставке на нуждающийся кластер, не больше total
+                                            #  → по поставке на нуждающийся кластер, не больше total;
+                                            #  в кластере с поставкой начатой заявки — только из начатых
 
 Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора: точная сумма →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
@@ -209,44 +210,74 @@ def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000
     raise KitError(f"Непересекающихся комплектов на {targets} нет ни в каком порядке: {last}")
 
 
+def _pick_for_need(cand, want):
+    """Наименьшая поставка не меньше потребности, иначе наибольшая (наименьший недобор); при равенстве — более ранний
+    слот."""
+    enough = [r for r in cand if int(r["quantity"]) >= want]
+    if enough:
+        return min(enough, key=lambda r: (int(r["quantity"]), _slot_key(r.get("timeslot_from")), str(r["supply_id"])))
+    return max(cand, key=lambda r: (int(r["quantity"]), -_slot_key(r.get("timeslot_from")).timestamp(),
+                                    str(r["supply_id"])))
+
+
 def by_need(rows, need, exclude=(), total=None):
-    """На каждый нуждающийся кластер — одна целая поставка: наименьшая не меньше потребности, иначе наибольшая
-    (наименьший недобор); перебор — в днях запаса по ADS. Кластеры без поставок — остаток новой заявкой.
+    """На каждый нуждающийся кластер — одна целая поставка; перебор — в днях запаса по ADS. Кластеры без поставок —
+    остаток новой заявкой.
+
+    Начатые заявки — первыми (владелец, 08.11.2026): слот частично отгруженной заявки уже не перенести, и её
+    неотгруженные поставки просрочатся, если их не взять, а слот свежей заявки переносится. Поэтому в кластере, где есть
+    поставка начатой заявки, выбор идёт только среди начатых (наименьшая не меньше потребности, иначе наибольшая —
+    недобор новой заявкой); свежие — только где начатых нет. Кластеры с начатыми разбираются раньше остальных, по
+    раннему слоту: при `total` бюджет достаётся им первым. `started_leftovers_not_taken` — поставки начатых заявок,
+    оставшиеся невзятыми (их слот не перенести — назвать пользователю).
 
     `total` — общий объём, который назвал пользователь («ровно 1128»): поставка, которая вывела бы взятое за него, не
     берётся (кластер — в `over_total`, его потребность — новой заявкой), а `left_for_new_order` — ровно total − взятое.
     Без `total` каждый кластер берёт свою поставку целиком, и взятое вместе с остатком бывает больше потребности."""
     free = _free_rows(rows, exclude)
-    used, out, missing, over_total = set(), [], [], []
     budget = None if total is None else int(total)
-    taken = 0
-    for n in need:
+    wants = []
+    for idx, n in enumerate(need):
         cid = str(n.get("cluster_id") or n.get("id") or "")
         raw = n.get("need", n.get("quantity", n.get("recommended_supply")))
         want = int(raw or 0)
-        if not cid or want <= 0:
-            continue
+        if cid and want > 0:
+            wants.append((idx, cid, want, n))
+
+    def urgency(w):
+        slots = [_slot_key(r.get("timeslot_from")) for r in free if str(r["cluster_id"]) == w[1] and r.get("started")]
+        return (not slots, min(slots) if slots else _LAST, w[0])
+
+    used, picked, missing, over_total = set(), [], [], []
+    taken = 0
+    for idx, cid, want, n in sorted(wants, key=urgency):
         cand = [r for r in free if str(r["cluster_id"]) == cid and str(r["supply_id"]) not in used]
         if not cand:
-            missing.append({"cluster_id": cid, "name": n.get("name"), "need": want})
+            missing.append((idx, {"cluster_id": cid, "name": n.get("name"), "need": want}))
             continue
         if budget is not None:
             cand = [r for r in cand if taken + int(r["quantity"]) <= budget]
             if not cand:
-                over_total.append({"cluster_id": cid, "name": n.get("name"), "need": want})
+                over_total.append((idx, {"cluster_id": cid, "name": n.get("name"), "need": want}))
                 continue
-        enough = [r for r in cand if int(r["quantity"]) >= want]
-        pick = (min(enough, key=lambda r: (int(r["quantity"]), not r.get("started"), str(r["supply_id"]))) if enough
-                else max(cand, key=lambda r: (int(r["quantity"]), r.get("started"), str(r["supply_id"]))))
+        pick = _pick_for_need([r for r in cand if r.get("started")] or cand, want)
         used.add(str(pick["supply_id"]))
         qty, ads = int(pick["quantity"]), float(n.get("ads") or 0)
         taken += qty
-        out.append({"cluster_id": cid, "name": n.get("name") or pick.get("cluster"), "need": want, "supply": pick,
-                    "quantity": qty, "over": max(0, qty - want), "short": max(0, want - qty),
-                    "over_days": round((qty - want) / ads, 1) if ads > 0 and qty > want else None})
+        picked.append((idx, {"cluster_id": cid, "name": n.get("name") or pick.get("cluster"), "need": want,
+                             "supply": pick, "quantity": qty, "over": max(0, qty - want),
+                             "short": max(0, want - qty),
+                             "over_days": round((qty - want) / ads, 1) if ads > 0 and qty > want else None}))
+    out = [c for _, c in sorted(picked, key=lambda x: x[0])]
+    missing = [m for _, m in sorted(missing, key=lambda x: x[0])]
+    over_total = [m for _, m in sorted(over_total, key=lambda x: x[0])]
+    leftovers = sorted((r for r in free if r.get("started") and str(r["supply_id"]) not in used),
+                       key=lambda r: (_slot_key(r.get("timeslot_from")), str(r["order_id"]), str(r["supply_id"])))
     result = {"clusters": out, "missing": missing, "taken_units": taken,
               "need_units": sum(c["need"] for c in out) + sum(m["need"] for m in missing + over_total),
               "left_for_new_order": sum(c["short"] for c in out) + sum(m["need"] for m in missing),
+              "from_started_orders": sum(c["quantity"] for c in out if c["supply"].get("started")),
+              "started_leftovers_not_taken": leftovers,
               "orders": sorted({c["supply"]["order_id"] for c in out})}
     if budget is not None:
         result.update({"total": budget, "over_total": over_total, "left_for_new_order": max(0, budget - taken)})
