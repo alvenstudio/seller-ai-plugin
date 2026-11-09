@@ -4,14 +4,20 @@
     python3 kits_select.py rows    in.json  # {"sku", "orders": [ответы supplies_orders_get], "now": "…Z",
                                             #  "dropoff_ids": [точки отгрузки, откуда везут] | null} → кандидаты
     python3 kits_select.py select  in.json  # {"rows": [...], "target": 6000 | "targets": [6000, 3000],
-                                            #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000}
+                                            #  "allow_repeats": true, "exclude_supply_ids": [...], "node_limit": 300000,
+                                            #  "packing": {"type": "BOX" | "PALLET", "box_size", "pallet_size"} | null,
+                                            #  "allow_repack": true}
     python3 kits_select.py by_need in.json  # {"rows": [...], "need": [{"cluster_id", "name", "need", "ads"}],
-                                            #  "exclude_supply_ids": [...], "total": 1128 | null, "node_limit": 1000000}
+                                            #  "exclude_supply_ids": [...], "total": 1128 | null, "node_limit": 1000000,
+                                            #  "packing": {...} | null, "allow_repack": true}
                                             #  → по поставке на нуждающийся кластер: больше покрыто (ровно total —
-                                            #  лучше всего) → больше штук начатых → меньше заявок; остаток новой
-                                            #  заявки — только в кластеры с продажами
+                                            #  лучше всего) → меньше поставок другого типа мест → больше штук начатых →
+                                            #  меньше заявок; остаток новой заявки — только в кластеры с продажами
 
-Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа. Приоритеты подбора `select`: точная сумма →
+Атом — целая поставка (кластер) заявки: весь её товар и все её грузоместа, как их подали. `packing` — упаковка товара на
+руках: поставка с местами другого типа (у пользователя коробки, а подана палетой, или наоборот) получает `repack` — как
+её везти — и берётся, только если без неё не покрыть потребность (`by_need`) или не набрать объём (`select`); без
+`allow_repack` не берётся вовсе. Приоритеты подбора `select`: точная сумма → меньше поставок другого типа мест →
 больше начатых заявок, взятых до конца → больше штук из начатых заявок → больше разных кластеров → меньше новых
 заявок → меньше поставок → при равенстве — поставки с более ранним слотом (без слота — последними). «Начатая»
 заявка — та, часть поставок которой уже отгружена или уже взята в комплекты
@@ -92,6 +98,8 @@ def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
                 why = "нет грузомест"
             elif any(not c.get("items") for c in cargo[sid]):
                 why = "состав грузомест не прочитан"
+            elif any(c.get("type") not in ("BOX", "PALLET") for c in cargo[sid]):
+                why = "тип грузомест не прочитан"
             elif sum(int(i.get("quantity") or 0) for c in cargo[sid] for i in c["items"]) != comp[sid][sku]:
                 why = "грузоместа не сходятся с количеством"
             elif slot.get("to") and now_ts and _ts(slot["to"]) < now_ts:
@@ -100,13 +108,70 @@ def rows_from_orders(order_pages, sku, now=None, dropoff_ids=None):
                 rejected.append(dict(base, reason=why))
                 continue
             sizes = sorted({sum(int(i["quantity"]) for i in c["items"]) for c in cargo[sid]})
+            places = sorted(({"type": c["type"], "units": sum(int(i["quantity"]) for i in c["items"])}
+                             for c in cargo[sid]), key=lambda p: (p["type"], -p["units"]))
+            kinds = {p["type"] for p in places}
             rows.append(dict(base, quantity=comp[sid][sku], cargo_ids=sorted(str(c["cargo_id"]) for c in cargo[sid]),
-                             units_per_place=sizes, started=started, needs_timeslot=not slot.get("from"),
+                             units_per_place=sizes, places=places,
+                             place_type=kinds.pop() if len(kinds) == 1 else "MIXED",
+                             started=started, needs_timeslot=not slot.get("from"),
                              needs_vehicle=needs_vehicle,
                              timeslot_from=slot.get("from"),
                              timeslot_local=slot.get("local_from"), dropoff=dropoff.get("name"),
                              dropoff_id=None if dropoff.get("id") is None else str(dropoff["id"])))
     return {"rows": rows, "rejected": rejected}
+
+
+MAX_BOXES, MAX_PALLETS = 30, 40  # мест в поставку, больше Ozon не примет
+
+
+def _repack(row, packing):
+    """Как везти поставку `row`, если упаковка товара на руках (`packing`: {"type": "BOX" | "PALLET", "box_size",
+    "pallet_size"}) другого типа, чем её места; None — тот же тип или упаковка не названа. Владелец, 09.11.2026:
+    предложить везти часть палетой, а часть коробками, — у пользователя коробки, а поставка подана палетой, — собрать
+    коробки на палету (`boxes_to_pallet`, `boxes_per_pallet` — своих коробок на каждую палету, None — не делится); у
+    него палеты, а поставка подана коробками, — разобрать палету на коробки (`pallet_to_boxes`). Состав Super-поставки
+    не меняют, а места — можно: тип мест Super не снимает (09.11.2026, тестовая заявка: коробка → палета → коробка), и
+    `redeclare` — места той же поставки под упаковку на руках, если они в пределах Ozon (30 коробок, 40 палет), иначе
+    `redeclare_blocked` с причиной."""
+    kind = (packing or {}).get("type")
+    if kind not in ("BOX", "PALLET") or row.get("place_type") == kind:
+        return None
+    other = "PALLET" if kind == "BOX" else "BOX"
+    places = row.get("places") or []
+    units = sorted((p["units"] for p in places if p["type"] == other), reverse=True)
+    kept = sum(1 for p in places if p["type"] == kind)  # места на руках того же типа остаются как есть
+    out = {"action": "boxes_to_pallet" if kind == "BOX" else "pallet_to_boxes", "places": len(units),
+           "units": sum(units), "units_per_place": sorted(set(units)), "redeclare": None}
+    if kind == "BOX":
+        size = int((packing or {}).get("box_size") or 0)
+        if size <= 0:
+            out["redeclare_blocked"] = "размер коробки не назван"
+            return out
+        out["boxes_per_pallet"] = [u // size if u % size == 0 else None for u in units]
+        if any(u % size for u in units):
+            out["redeclare_blocked"] = f"палета не делится на коробки по {size}"
+        elif kept + sum(units) // size > MAX_BOXES:
+            out["redeclare_blocked"] = f"{kept + sum(units) // size} коробок — больше {MAX_BOXES} в поставку"
+        else:
+            out["redeclare"] = {"type": "BOX", "places": sum(units) // size, "units_per_place": size}
+        return out
+    size = int((packing or {}).get("pallet_size") or 0)
+    pallets = -(-sum(units) // size) if size > 0 else 1
+    if kept + pallets > MAX_PALLETS:
+        out["redeclare_blocked"] = f"{kept + pallets} палет — больше {MAX_PALLETS} в поставку"
+    else:
+        out["redeclare"] = {"type": "PALLET", "places": pallets, "units": sum(units)}
+    return out
+
+
+def _packed(rows, packing, allow_repack=True):
+    """Строки с `repack` по упаковке на руках; без `allow_repack` поставки другого типа мест не берутся (→ `held`)."""
+    kept, held = [], []
+    for r in rows:
+        rp = _repack(r, packing)
+        (held if rp and not allow_repack else kept).append(dict(r, repack=rp))
+    return kept, held
 
 
 def _free_rows(rows, exclude):
@@ -176,16 +241,18 @@ def _search(groups, score, target=None, prune=None, arrange=None, node_limit=300
     return best, best_score, nodes
 
 
-def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
+def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000, packing=None, allow_repack=True):
     if isinstance(target, bool) or not isinstance(target, int) or target <= 0:
         raise KitError("Нужно целое количество больше нуля")
-    rows = _free_rows(rows, exclude)
+    rows, held = _packed(_free_rows(rows, exclude), packing, allow_repack)
     if not rows:
         raise KitError("Нет свободных подходящих поставок")
-    # Ранний слот — первым (без слота — в конце): последний разрыв ничьей берёт поставки с меньшими номерами строк.
-    rows.sort(key=lambda r: (not r.get("started"), _slot_key(r.get("timeslot_from")), str(r["order_id"]),
-                             -int(r["quantity"]), str(r["supply_id"])))
+    # Поставки своего типа мест и ранний слот — первыми (без слота — в конце): последний разрыв ничьей берёт поставки
+    # с меньшими номерами строк.
+    rows.sort(key=lambda r: (bool(r.get("repack")), not r.get("started"), _slot_key(r.get("timeslot_from")),
+                             str(r["order_id"]), -int(r["quantity"]), str(r["supply_id"])))
     q = [int(r["quantity"]) for r in rows]
+    rep = [1 if r.get("repack") else 0 for r in rows]
     n = len(rows)
     started_orders = {}
     for i, r in enumerate(rows):
@@ -198,17 +265,24 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
         units_started = sum(q[i] for i in chosen if rows[i].get("started"))
         clusters = len({rows[i]["cluster_id"] for i in chosen})
         new_orders = len({rows[i]["order_id"] for i in chosen if not rows[i].get("started")})
-        return (completed, units_started, clusters, -new_orders, -len(chosen), -sum(chosen))
+        return (-sum(rep[i] for i in chosen), completed, units_started, clusters, -new_orders, -len(chosen),
+                -sum(chosen))
 
     started_left = [0] * (n + 1)
     for i in range(n - 1, -1, -1):
         started_left[i] = started_left[i + 1] + (q[i] if rows[i].get("started") else 0)
 
-    def prune(i, chosen, remaining, best_score):  # все начатые взяты до конца — штук начатых больше не набрать
-        if best_score is None or best_score[0] != len(started_orders):
+    def prune(i, chosen, remaining, best_score):
+        if best_score is None:
             return False
+        repacked = -sum(rep[k] for k in chosen)  # больше поставок другого типа набор уже не станет меньше
+        if repacked != best_score[0]:
+            return repacked < best_score[0]
+        if best_score[1] != len(started_orders):
+            return False
+        # все начатые взяты до конца — штук начатых больше не набрать
         done = sum(q[k] for k in chosen if rows[k].get("started"))
-        return done + min(remaining, started_left[i]) < best_score[1]
+        return done + min(remaining, started_left[i]) < best_score[2]
 
     # Группа — одна поставка; без повторов ключ — кластер.
     groups = [[(q[i], i, None if allow_repeats else rows[i]["cluster_id"])] for i in range(n)]
@@ -227,10 +301,17 @@ def select(rows, target, allow_repeats=True, exclude=(), node_limit=300000):
             "clusters": len({r["cluster_id"] for r in picked}),
             "repeated_clusters": len(picked) - len({r["cluster_id"] for r in picked}),
             "orders": sorted({r["order_id"] for r in picked}),
-            "started_leftovers_not_taken": leftovers}
+            "started_leftovers_not_taken": leftovers, "repack": _repacks(picked), "held_for_packing": held}
 
 
-def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000):
+def _repacks(picked):
+    """Взятые поставки, которые везти не так, как упакован товар на руках: что спросить у пользователя."""
+    return [{"cluster_id": r["cluster_id"], "cluster": r.get("cluster"), "supply_id": r["supply_id"],
+             "order_id": r["order_id"], "order_number": r.get("order_number"), "quantity": int(r["quantity"]),
+             "place_type": r.get("place_type"), **r["repack"]} for r in picked if r.get("repack")]
+
+
+def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000, packing=None, allow_repack=True):
     """Несколько комплектов из непересекающихся поставок: по порядку пользователя, а если так не выходит —
     в другом порядке (первый удачный); поставки взятых комплектов исключаются из следующих."""
     if not targets or len(targets) > 6:
@@ -240,7 +321,7 @@ def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000
         taken, kits = list(exclude), {}
         try:
             for i in perm:
-                kits[i] = select(rows, targets[i], allow_repeats, taken, node_limit)
+                kits[i] = select(rows, targets[i], allow_repeats, taken, node_limit, packing, allow_repack)
                 taken += [r["supply_id"] for r in kits[i]["supplies"]]
         except KitError as e:
             last = e
@@ -252,11 +333,12 @@ def select_many(rows, targets, allow_repeats=True, exclude=(), node_limit=300000
 
 # Вариант поставки в кластере для `by_need`: q — штук; st — штук начатой заявки (q или 0); order — заявка; units —
 # перебор сверх потребности в кластере без продаж (штук); days — перебор в днях запаса по ADS, ×10⁶ (целые — суммы
-# точные); cov — покрытая потребность кластера; gi — номер кластера в переборе; row — строка-кандидат.
-_Opt = namedtuple("_Opt", "q st order units days cov gi row")
+# точные); cov — покрытая потребность кластера; gi — номер кластера в переборе; row — строка-кандидат; rep — 1, если
+# её места другого типа, чем упаковка на руках (`repack`).
+_Opt = namedtuple("_Opt", "q st order units days cov gi row rep")
 
 
-def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
+def by_need(rows, need, exclude=(), total=None, node_limit=1000000, packing=None, allow_repack=True):
     """По одной целой поставке на нуждающийся кластер; что не покрыто готовыми поставками — остаток новой заявкой.
 
     Владелец, 08.11.2026: «Давай приоритетно брать такие поставки, чтобы потребность максимально покрыть. Лучше будет
@@ -264,12 +346,16 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
     сгорающие поставки.» Поэтому подборы сравниваются по порядку:
     1. больше покрыто готовыми поставками — меньше `left_for_new_order`: с `total` взятое не больше него и ровно
        `total` — лучше всего (`exact`); без `total` — в каждом кластере больше покрытой потребности;
-    2. затем больше штук начатых заявок: слот частично отгруженной заявки не перенести, её невзятые поставки сгорят;
-    3. затем меньше заявок (слотов) — лучше одна; затем меньше перебора сверх потребности (сначала штуки в кластерах
+    2. затем меньше поставок, места которых другого типа, чем упаковка на руках (`packing`; владелец, 09.11.2026:
+       «пусть предлагается часть отправить палетой, а часть коробками», когда по-другому потребность кластера не
+       покрыть) — такая поставка берётся, только если без неё покрыто меньше, и её `repack` спрашивают у пользователя;
+    3. затем больше штук начатых заявок: слот частично отгруженной заявки не перенести, её невзятые поставки сгорят;
+    4. затем меньше заявок (слотов) — лучше одна; затем меньше перебора сверх потребности (сначала штуки в кластерах
        без продаж, затем дни запаса по ADS); затем более ранние слоты.
     Перебор — общий с `select` (`_search`): точная сумма по битовым маскам, границы по каждому критерию, предел
-    `node_limit` шагов. Покрытие и штуки начатых считаются точно до перебора, и любой найденный подбор их держит;
-    оборван перебор — `proven: false`: не доказано лишь, что меньше заявок, перебора и раньше слоты не найти.
+    `node_limit` шагов. Покрытие, поставки другого типа мест и штуки начатых считаются точно до перебора, и любой
+    найденный подбор их держит; оборван перебор — `proven: false`: не доказано лишь, что меньше заявок, перебора и
+    раньше слоты не найти.
 
     `total` — общий объём, который назвал пользователь («ровно 1128»): взятое + `left_for_new_order` = total, кластер
     с поставками, не вошедшими в подбор, — в `over_total`. Без `total` каждый кластер берёт поставку целиком, и взятое
@@ -277,8 +363,9 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
     (`ads` > 0): по непокрытой потребности, больший — первым; излишек сверх неё при `total` — в кластер с наибольшим
     ADS. Непокрытое там, где продаж нет, — `no_sales`, новой заявке не отдаётся. `ads` не передан ни одному кластеру —
     продаж не проверить: `sales_checked: false`, остаток — по непокрытой потребности всех кластеров.
-    `started_leftovers_not_taken` — невзятые поставки начатых заявок (назвать пользователю)."""
-    free = _free_rows(rows, exclude)
+    `started_leftovers_not_taken` — невзятые поставки начатых заявок (назвать пользователю); `repack` — взятые
+    поставки другого типа мест, как их везти; `held_for_packing` — такие поставки, не взятые без `allow_repack`."""
+    free, held = _packed(_free_rows(rows, exclude), packing, allow_repack)
     budget = None if total is None else int(total)
     if budget is not None and budget < 0:
         raise KitError("total — целое число не меньше нуля")
@@ -316,13 +403,16 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
             q = int(r["quantity"])
             over = max(0, q - w["need"])
             o.append(_Opt(q, q if r.get("started") else 0, str(r["order_id"]), 0 if sells else over,
-                          round(over * 1e6 / w["ads"]) if sells else 0, min(q, w["need"]), gi, r))
-        if budget is None:  # без total кластеры не связаны: в каждом — больше покрытия, затем больше штук начатых
-            top = max(x.cov for x in o)
+                          round(over * 1e6 / w["ads"]) if sells else 0, min(q, w["need"]), gi, r,
+                          1 if r.get("repack") else 0))
+        if budget is None:  # без total кластеры не связаны: в каждом — больше покрытия, затем своего типа мест,
+            top = max(x.cov for x in o)  # затем больше штук начатых
             o = [x for x in o if x.cov == top]
+            low = min(x.rep for x in o)
+            o = [x for x in o if x.rep == low]
             top = max(x.st for x in o)
             o = [x for x in o if x.st == top]
-        o.sort(key=lambda x: (-x.st, -spread[x.order], x.units, x.days, order_rank[x.order], x.order,
+        o.sort(key=lambda x: (x.rep, -x.st, -spread[x.order], x.units, x.days, order_rank[x.order], x.order,
                               str(x.row["supply_id"])))
         opts.append(o)
     # Перебор — с кластеров, где выбрать заявку не из чего (меньше разных заявок): раньше видно, сколько их нужно.
@@ -335,12 +425,13 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
 
     def score(chosen):
         orders = {x.order for x in chosen}
-        return (sum(x.cov if budget is None else x.q for x in chosen), sum(x.st for x in chosen), -len(orders),
-                -sum(x.units for x in chosen), -sum(x.days for x in chosen), -ranks(orders))
+        return (sum(x.cov if budget is None else x.q for x in chosen), -sum(x.rep for x in chosen),
+                sum(x.st for x in chosen), -len(orders), -sum(x.units for x in chosen), -sum(x.days for x in chosen),
+                -ranks(orders))
 
     def split(options, chosen, best_score):  # сначала поставки уже взятых заявок; новые — пока заявок меньше лучшего
         orders = {x.order for x in chosen}
-        cap = None if best_score is None else -best_score[2]
+        cap = None if best_score is None else -best_score[3]
         same = [t for t in options if t[1].order in orders]
         other = [] if cap is not None and len(orders) >= cap else [t for t in options if t[1].order not in orders]
         return same, other
@@ -372,7 +463,22 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
                         c, v = cur[s], (b[0] + x.st, b[1] + x.units, b[2] + x.days)
                         cur[s] = v if c is None else (max(c[0], v[0]), min(c[1], v[1]), min(c[2], v[2]))
             dp[g] = cur
-        best_started = dp[0][top][0]
+        # lex[g][s] — по кластерам g… ровно s·step штук: меньше поставок другого типа мест, при них больше штук
+        # начатых (точно, в этом порядке); None — такой суммы не набрать.
+        lex = [None] * (n + 1)
+        lex[n] = [(0, 0)] + [None] * top
+        for g in range(n - 1, -1, -1):
+            nxt, cur = lex[g + 1], list(lex[g + 1])
+            for x in opts[g]:
+                k = x.q // step
+                for s in range(k, top + 1):
+                    b = nxt[s - k]
+                    if b is not None:
+                        c, v = cur[s], (b[0] + x.rep, b[1] + x.st)
+                        if c is None or (v[0], -v[1]) < (c[0], -c[1]):
+                            cur[s] = v
+            lex[g] = cur
+        best_rep, best_started = lex[0][top]
         sizes = [{} for _ in range(n)]  # кластер → заявка → штук в её поставках
         for g, o in enumerate(opts):
             for x in o:
@@ -397,18 +503,18 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
         def completes(g, orders, remaining):  # взятые заявки сами наберут остаток
             return (alone(g, frozenset(orders)) >> remaining) & 1
 
-        def fits(g, st, remaining):  # ещё можно набрать наибольшую сумму и наибольшее число штук начатых
-            b = dp[g][remaining // step]
-            return b is not None and st + b[0] >= best_started
+        def fits(g, rp, st, remaining):  # ещё можно набрать наибольшую сумму с наименьшим числом поставок другого
+            b = lex[g][remaining // step]  # типа мест и при нём наибольшее число штук начатых
+            return b is not None and rp + b[0] == best_rep and st + b[1] >= best_started
 
         def arrange(g, options, chosen, remaining, best_score):
-            st = sum(x.st for x in chosen)
+            rp, st = sum(x.rep for x in chosen), sum(x.st for x in chosen)
             same, other = split([t for t in options if t[0] <= remaining
-                                 and fits(g + 1, st + t[1].st, remaining - t[0])], chosen, best_score)
+                                 and fits(g + 1, rp + t[1].rep, st + t[1].st, remaining - t[0])], chosen, best_score)
             if other:  # новая заявка, с которой взятые наберут остаток, — первой
                 orders = {x.order for x in chosen}
                 other.sort(key=lambda t: not completes(g + 1, orders | {t[1].order}, remaining - t[0]))
-            skip = [None] if fits(g + 1, st, remaining) else []
+            skip = [None] if fits(g + 1, rp, st, remaining) else []
             return same + skip + other if chosen else other + skip
 
         def prune(g, chosen, remaining, best_score):
@@ -419,9 +525,9 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
                 return False
             orders = {x.order for x in chosen}
             k = len(orders)  # заявок будет не меньше; ещё одна, если взятые заявки остаток не наберут
-            if k + 1 >= -best_score[2] and remaining and not completes(g, orders, remaining):
+            if k + 1 >= -best_score[3] and remaining and not completes(g, orders, remaining):
                 k += 1
-            return (target, best_started, -k, -sum(x.units for x in chosen) - b[1],
+            return (target, -best_rep, best_started, -k, -sum(x.units for x in chosen) - b[1],
                     -sum(x.days for x in chosen) - b[2], -ranks(orders)) <= best_score
     else:
         target = None
@@ -433,7 +539,8 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
         for g, orders in enumerate(group_orders):
             for o in orders:
                 order_groups.setdefault(o, set()).add(g)
-        best_cov, best_started = sum(o[0].cov for o in opts), sum(o[0].st for o in opts)
+        best_cov, best_rep = sum(o[0].cov for o in opts), sum(o[0].rep for o in opts)
+        best_started = sum(o[0].st for o in opts)
 
         def uncovered(g, orders):  # кластеры g…, где у взятых заявок нет поставки
             return {h for h in range(g, n) if not group_orders[h] & orders}
@@ -458,7 +565,7 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
                         apart, seen_orders = apart + 1, seen_orders | group_orders[h]
                 most = max(len(order_groups[o] & rest) for h in rest for o in group_orders[h])
                 k += max(apart, -(-len(rest) // most))
-            return (best_cov, best_started, -k, -sum(x.units for x in chosen) - low[g][0],
+            return (best_cov, -best_rep, best_started, -k, -sum(x.units for x in chosen) - low[g][0],
                     -sum(x.days for x in chosen) - low[g][1], -ranks(orders)) <= best_score
 
     best, _, nodes = _search([[(x.q, x, None) for x in o] for o in opts], score, target, prune, arrange, node_limit)
@@ -476,7 +583,8 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
         out.append({"cluster_id": w["cluster_id"], "name": w["name"] or x.row.get("cluster"), "need": w["need"],
                     "supply": x.row, "quantity": x.q, "over": max(0, x.q - w["need"]),
                     "short": max(0, w["need"] - x.q),
-                    "over_days": round((x.q - w["need"]) / ads, 1) if ads > 0 and x.q > w["need"] else None})
+                    "over_days": round((x.q - w["need"]) / ads, 1) if ads > 0 and x.q > w["need"] else None,
+                    "repack": x.row.get("repack")})
     missing = [{"cluster_id": w["cluster_id"], "name": w["name"], "need": w["need"]}
                for w in wants if not cand.get(w["cluster_id"])]
     taken = sum(x.q for x in best)
@@ -514,7 +622,7 @@ def by_need(rows, need, exclude=(), total=None, node_limit=1000000):
               "from_started_orders": sum(x.st for x in best), "started_leftovers_not_taken": leftovers,
               "orders": sorted({x.row["order_id"] for x in best}),
               "slots": sorted({x.row.get("timeslot_from") for x in best}, key=lambda v: (_slot_key(v), str(v))),
-              "proven": nodes <= node_limit}
+              "proven": nodes <= node_limit, "repack": _repacks([x.row for x in best]), "held_for_packing": held}
     if budget is not None:
         result.update({"total": budget, "over_total": over_total, "exact": taken == budget})
     return result
@@ -526,18 +634,21 @@ def main():
     ap.add_argument("input")
     a = ap.parse_args()
     d = json.loads(sys.stdin.read() if a.input == "-" else open(a.input, encoding="utf-8").read())
+    packing, allow_repack = d.get("packing"), d.get("allow_repack", True) is not False
     try:
+        if packing is not None and (not isinstance(packing, dict) or packing.get("type") not in ("BOX", "PALLET")):
+            raise KitError('packing — {"type": "BOX" | "PALLET", "box_size", "pallet_size"} или null')
         if a.command == "rows":
             r = rows_from_orders(d["orders"], d["sku"], d.get("now"), d.get("dropoff_ids"))
         elif a.command == "by_need":
             r = by_need(d["rows"], d["need"], d.get("exclude_supply_ids") or (), d.get("total"),
-                        int(d.get("node_limit", 1000000)))
+                        int(d.get("node_limit", 1000000)), packing, allow_repack)
         elif d.get("targets"):
             r = select_many(d["rows"], d["targets"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
-                            int(d.get("node_limit", 300000)))
+                            int(d.get("node_limit", 300000)), packing, allow_repack)
         else:
             r = select(d["rows"], d["target"], d.get("allow_repeats", True), d.get("exclude_supply_ids") or (),
-                       int(d.get("node_limit", 300000)))
+                       int(d.get("node_limit", 300000)), packing, allow_repack)
     except (KitError, KeyError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         sys.exit(2)
