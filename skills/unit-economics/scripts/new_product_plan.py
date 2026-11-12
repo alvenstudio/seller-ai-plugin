@@ -2,11 +2,11 @@
 """Плановая юнит-экономика товара, которого ещё нет в магазине (нет карточки в Ozon).
 
 Для карточек магазина план считает Seller AI (unit_economics_plan_list / _preview). Этот скрипт нужен только для нового
-товара: он берёт тарифы логистики FBO из справочника Ozon (references/logistika-fbo-fbs.xlsx), фиксированные доли рынка
+товара: он берёт локальные тарифы FBO с 30.10.2026 с запасом 25 п.п. (references/logistika-fbo-fbs.xlsx), резервные доли
 кластеров и считает строку той же формулой v5, что Seller AI (references/plan-formula.schema.json), — ничего не запрашивая.
 
     python3 new_product_plan.py --inputs product.json [--plan plan.json] [--settings settings.json] \
-        [--formula formula.json] [--clusters "Москва, МО и Дальние регионы" "Казань" | --ideal] [--json]
+        [--formula formula.json] [--json]
 
 product.json — то, что известно о товаре: price, cost, volume_liters, drr (доля), commission_micro / _low / _high (доли из
 references/commissions-*.tsv навыка category-commissions или stores_commission_rules_list), при желании любые другие входы
@@ -16,7 +16,8 @@ references/commissions-*.tsv навыка category-commissions или stores_com
             «supply_cost ÷ volume_liters» строк магазина, без таких строк — объём × 15 ₽;
 --settings  ответ stores_economics_settings_get: налог, база, НДС, выкуп по умолчанию, прочие расходы, звёздные, досрочная;
 --formula   formula_schema из ответа unit_economics_plan_list (по умолчанию — копия в references);
---clusters  кластеры, где будет лежать товар (по умолчанию — идеальная раскладка: товар в каждом кластере).
+Нет остатка и своих начислений: локальные тарифы с запасом 25 п.п. на ближайший другой кластер, как в Seller AI.
+Доли — резерв из файла Ozon: общие доли заказов магазинов офлайн недоступны; логистика не берётся из медианы магазина.
 """
 import argparse
 import json
@@ -25,16 +26,16 @@ import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from decimal import Decimal, ROUND_HALF_EVEN
 
 REFERENCES = Path(__file__).resolve().parent.parent / "references"
 TARIFFS_XLSX = REFERENCES / "logistika-fbo-fbs.xlsx"
 MARKET_SHARES = REFERENCES / "cluster_market_share_defaults.json"
 FORMULA = REFERENCES / "plan-formula.schema.json"
 
-# Ozon переименовывает листы от версии к версии файла: до 28.08.2026 «Тарифы на логистику» / «Универсальные тарифы»,
-# с 28.08.2026 «Логистика РФ» / «Тарифы по умолчанию». Порядок столбцов: объём, откуда, куда, тариф до 300 ₽, от 300 ₽.
-TARIFF_SHEETS = ("Логистика РФ", "Тарифы на логистику")
-DEFAULT_SHEETS = ("Тарифы по умолчанию", "Универсальные тарифы")
+# Матрица Ozon с 30.10.2026: объём, откуда, куда, тариф до 300 ₽, выше 300 ₽.
+TARIFF_SHEETS = ("Логистика РФ",)
+MARGIN_SHARE = Decimal("0.25")  # запас нового товара без остатка, решение Seller AI от 12.11.2026
 NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
@@ -87,7 +88,7 @@ def _float(text):
 
 
 def load_tariffs(path=TARIFFS_XLSX):
-    """(матрица {(объём, откуда, куда, cheap|expensive): ₽}, порядок диапазонов, тарифы по умолчанию {(объём, бакет): ₽})."""
+    """Матрица {(объём, откуда, куда, cheap|expensive): ₽} и порядок диапазонов. Универсальные тарифы не читаются."""
     matrix, order = {}, []
     for vals in _sheet_rows(path, TARIFF_SHEETS):
         if len(vals) < 5:
@@ -101,18 +102,7 @@ def load_tariffs(path=TARIFFS_XLSX):
             matrix[(vol, src, dst, "cheap")] = _float(cheap)
         if expensive:
             matrix[(vol, src, dst, "expensive")] = _float(expensive)
-    defaults = {}
-    for vals in _sheet_rows(path, DEFAULT_SHEETS):
-        if len(vals) < 3:
-            continue
-        vol, cheap, expensive = (v.strip() for v in vals[:3])
-        if not vol or vol == "Объём товара":
-            continue
-        if cheap:
-            defaults[(vol, "cheap")] = _float(cheap)
-        if expensive:
-            defaults[(vol, "expensive")] = _float(expensive)
-    return matrix, order, defaults
+    return matrix, order
 
 
 def _range(label):
@@ -132,30 +122,47 @@ def volume_bucket(volume_liters, order):
     raise ValueError(f"нет диапазона объёма для {volume_liters} л")
 
 
-def cluster_logistics(volume_liters, source_clusters, tariffs, shares, bucket):
-    """Средний тариф FBO по долям рынка кластеров доставки: локальная продажа — тариф кластера в себя,
-    иначе самый дешёвый маршрут из кластеров с товаром, маршрута нет в матрице — тариф по умолчанию объёма."""
-    matrix, order, defaults = tariffs
+def cluster_logistics(volume_liters, tariffs, shares, bucket):
+    """Новый товар без остатка и начислений: локальные тарифы + 25 п.п. по ближайшему другому кластеру.
+
+    Как plan::logistics::without_stock: непокрытые направления пропускаются, веса известных нормируются.
+    Отсутствие локального маршрута — ближайший другой, без запаса; отсутствие всех маршрутов — неизвестно.
+    """
+    matrix, order = tariffs
     vol = volume_bucket(volume_liters, order)
-    sources = [c.strip() for c in source_clusters]
-    details, total = [], 0.0
-    for dst, share in shares.items():
-        local = matrix.get((vol, dst, dst, bucket)) if dst in sources else None
-        if local is not None:
-            src, tariff, how = dst, local, "local"
-        else:
-            options = [(matrix[(vol, s, dst, bucket)], s) for s in sources if (vol, s, dst, bucket) in matrix]
-            if options:
-                tariff, src = min(options)
-                how = "nonlocal"
-            else:
-                tariff, src, how = defaults.get((vol, bucket)), None, "default"
-        if tariff is None:
-            raise ValueError(f"нет тарифа для {dst} ({vol}, {bucket})")
-        total += tariff * share
-        details.append({"destination_cluster": dst, "share": share, "source_cluster": src, "route": how,
-                        "tariff": round(tariff, 2)})
-    return {"volume_bucket": vol, "average": round(total, 2), "details": details}
+    dec = lambda value: Decimal(str(value))
+    rub = lambda value: float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))
+    details = []
+    total = margin_total = local_total = weight = Decimal(0)
+    for dst, raw_share in shares.items():
+        share = dec(raw_share)
+        if share <= 0:
+            continue
+        local = matrix.get((vol, dst, dst, bucket))
+        others = [dec(amount) for (v, src, target, band), amount in matrix.items()
+                  if v == vol and target == dst and src != dst and band == bucket]
+        away = min(others) if others else None
+        if local is None and away is None:
+            continue
+        amount = dec(local) if local is not None else away
+        nonlocal_tariff = away if away is not None else amount
+        margin = MARGIN_SHARE * max(nonlocal_tariff - amount, Decimal(0)) if local is not None else Decimal(0)
+        local_share = 1 if local is not None else 0
+        weight += share
+        total += share * amount
+        margin_total += share * margin
+        local_total += share * local_share
+        details.append({"destination_cluster": dst, "share": float(share), "amount": rub(amount),
+                        "local_tariff": None if local is None else float(local),
+                        "nonlocal_tariff": None if away is None else float(away),
+                        "local_share": local_share, "stock": 0, "cover_days": None})
+    if not weight:
+        raise ValueError(f"нет маршрутов для {vol} ({bucket})")
+    for detail in details:
+        detail["share"] = float(dec(detail["share"]) / weight)
+    return {"volume_bucket": vol, "average": rub((total + margin_total) / weight),
+            "ideal": rub(total / weight), "margin": rub(margin_total / weight),
+            "margin_share": float(MARGIN_SHARE), "local_share": float(local_total / weight), "details": details}
 
 
 # ── формула плана v5 (AST из plan-formula.schema.json) ────────────────
@@ -250,7 +257,7 @@ def settings_inputs(settings):
     return out
 
 
-def build_inputs(product, plan=None, settings=None, clusters=None, tariffs=None, shares=None):
+def build_inputs(product, plan=None, settings=None, tariffs=None, shares=None):
     """Входы формулы и откуда каждый: product, иначе медиана плана магазина, иначе его настройки, иначе умолчания Seller AI."""
     inputs, sources = dict(DEFAULTS), {k: "default" for k in DEFAULTS}
     for layer, name in ((settings_inputs(settings), "store_setting"), (store_priors(plan), "store_prior"),
@@ -268,19 +275,15 @@ def build_inputs(product, plan=None, settings=None, clusters=None, tariffs=None,
     if need:
         if product.get("volume_liters") is None:
             raise ValueError("нужен volume_liters (или logistics_lt_300 и logistics_gte_300)")
-        source = clusters if clusters else list(shares)
-        logistics = {"clusters": "ideal" if not clusters else source}
+        logistics = {"shares_source": "ozon_file", "stock_units": 0}
         for key, bucket in (("logistics_lt_300", "cheap"), ("logistics_gte_300", "expensive")):
-            res = cluster_logistics(float(product["volume_liters"]), source, tariffs, shares, bucket)
+            res = cluster_logistics(float(product["volume_liters"]), tariffs, shares, bucket)
             logistics[key] = res
             if key in need:
                 inputs[key] = res["average"]
                 sources[key] = "tariff_model"
-        if clusters:
-            ideal = cluster_logistics(float(product["volume_liters"]), list(shares), tariffs, shares,
-                                      "cheap" if float(product.get("price") or 0) <= 300 else "expensive")
-            bucket_key = "logistics_lt_300" if float(product.get("price") or 0) <= 300 else "logistics_gte_300"
-            logistics["overpay"] = round(logistics[bucket_key]["average"] - ideal["average"], 2)
+        chosen = "logistics_lt_300" if float(product.get("price") or 0) <= 300 else "logistics_gte_300"
+        logistics["overpay"] = round(logistics[chosen]["average"] - logistics[chosen]["ideal"], 2)
     if "reverse_logistics" not in product:
         price = product.get("price")
         key = "logistics_lt_300" if price is not None and float(price) <= 300 else "logistics_gte_300"
@@ -314,11 +317,11 @@ def render(result):
         lines += ["", "Не хватает входов: " + ", ".join(result["missing"]) + " — прибыль неизвестна."]
     log = result.get("logistics")
     if log:
-        lines += ["", f"Логистика FBO по кластерам ({'идеальная раскладка' if log['clusters'] == 'ideal' else 'товар в: ' + ', '.join(log['clusters'])}): "
-                  f"до 300 ₽ — {rub(log['logistics_lt_300']['average'])}, от 300 ₽ — {rub(log['logistics_gte_300']['average'])}, "
-                  f"объём {log['logistics_gte_300']['volume_bucket']}"]
-        if "overpay" in log:
-            lines.append(f"Переплата за раскладку против идеальной — {rub(log['overpay'])} на единицу.")
+        lines += ["", f"Логистика FBO с 30.10.2026: локальные тарифы с запасом 25 п.п. на другой кластер; "
+                  f"до 300 ₽ — {rub(log['logistics_lt_300']['average'])}, выше 300 ₽ — {rub(log['logistics_gte_300']['average'])}, "
+                  f"объём {log['logistics_gte_300']['volume_bucket']}",
+                  "Доли кластеров — резерв из файла Ozon; общие доли заказов Seller AI офлайн недоступны.",
+                  f"Переплата к локальным тарифам (запас включён) — {rub(log['overpay'])} на единицу."]
     return "\n".join(lines) + "\n"
 
 
@@ -333,8 +336,6 @@ def main(argv=None):
     ap.add_argument("--plan")
     ap.add_argument("--settings")
     ap.add_argument("--formula")
-    ap.add_argument("--clusters", nargs="*")
-    ap.add_argument("--ideal", action="store_true")
     ap.add_argument("--tariffs", default=str(TARIFFS_XLSX))
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -346,7 +347,7 @@ def main(argv=None):
     shares = load(MARKET_SHARES)
     inputs, sources, logistics, missing = build_inputs(
         product, load(args.plan) if args.plan else None, load(args.settings) if args.settings else None,
-        None if args.ideal else args.clusters, tariffs, shares)
+        tariffs, shares)
     result = {"formula_version": formula.get("version"), "inputs": inputs, "sources": sources,
               "computed": compute(formula, inputs), "logistics": logistics, "missing": missing}
     if args.json:
